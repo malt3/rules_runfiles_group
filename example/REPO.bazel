@@ -1,0 +1,4 @@
+ignore_directories([
+    "producer/stdlib_repo/**",
+    "third_party/**",
+])

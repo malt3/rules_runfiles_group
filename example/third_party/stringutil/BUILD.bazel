@@ -1,0 +1,9 @@
+# buildifier: disable=canonical-repository
+load("@@//producer/rules:starlark_library.bzl", "starlark_library")
+
+starlark_library(
+    name = "stringutil",
+    srcs = ["stringutil.star"],
+    repository = "stringutil",
+    visibility = ["//visibility:public"],
+)

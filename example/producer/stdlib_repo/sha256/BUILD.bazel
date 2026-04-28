@@ -1,0 +1,16 @@
+# buildifier: disable=canonical-repository
+load("@@//producer/rules:starlark_library.bzl", "starlark_library")
+load("@bazel_skylib//rules:copy_file.bzl", "copy_file")
+
+copy_file(
+    name = "implementation_src",
+    src = "@sha256.bzl//:sha256.star",
+    out = "sha256.star",
+)
+
+starlark_library(
+    name = "sha256",
+    srcs = ["sha256.star"],
+    repository = "std",
+    visibility = ["//visibility:public"],
+)
