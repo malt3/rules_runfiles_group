@@ -1,0 +1,77 @@
+load("//consumer/rules:fake_package.bzl", "fake_package")
+load("//producer/rules:skip_interpreter.bzl", "skip_interpreter")
+load("//producer/rules:starlark_binary.bzl", "starlark_binary")
+load("//producer/rules:starlark_library.bzl", "starlark_library")
+
+# This is a mixin users can add to aspect_hints of a binary target to skip the interpreter group.
+skip_interpreter(name = "skip_interpreter")
+
+starlark_library(
+    name = "lib_a",
+    srcs = ["lib_a.star"],
+    data = ["a.txt"],
+)
+
+starlark_library(
+    name = "lib_b",
+    srcs = ["lib_b.star"],
+    data = ["b.txt"],
+)
+
+starlark_binary(
+    name = "adder",
+    src = "adder.star",
+    runfiles_grouping = "by_target",
+    deps = [
+        ":lib_a",
+        ":lib_b",
+    ],
+)
+
+starlark_binary(
+    name = "adder_without_interpreter",
+    src = "adder.star",
+    # Signal to the packaging rules:
+    # Apply a transform to the runfiles grouping.
+    aspect_hints = [":skip_interpreter"],
+    runfiles_grouping = "by_target",
+    deps = [
+        ":lib_a",
+        ":lib_b",
+    ],
+)
+
+starlark_binary(
+    name = "hasher",
+    src = "hasher.star",
+    data = ["@irs_f1040//file"],
+)
+
+starlark_binary(
+    name = "3p_deps_demo",
+    src = "3p_deps_demo.star",
+    deps = [
+        "@fizzbuzz",
+        "@stringutil",
+    ],
+)
+
+fake_package(
+    name = "adder_pkg",
+    binary = ":adder",
+)
+
+fake_package(
+    name = "adder_without_interpreter_pkg",
+    binary = ":adder_without_interpreter",
+)
+
+fake_package(
+    name = "hasher_pkg",
+    binary = ":hasher",
+)
+
+fake_package(
+    name = "3p_deps_demo_pkg",
+    binary = ":3p_deps_demo",
+)

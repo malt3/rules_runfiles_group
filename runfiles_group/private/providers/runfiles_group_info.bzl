@@ -11,7 +11,6 @@ Merging all depsets from all fields should yield the same set (or a superset) of
 
 This provider functions similarly to OutputGroupInfo, but its presence in the output of a rule indicates that it can be used instead of DefaultInfo.default_runfiles.
 It categorizes the runfiles of a target into different groups, allowing for more fine-grained control over which runfiles are used in different contexts.
-While some well-known categories are defined here, others can be defined by rules as needed.
 """
 
 def _make_runfilesgroupinfo_init(**kwargs):
