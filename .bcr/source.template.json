@@ -1,0 +1,6 @@
+{
+  "integrity": "**leave this alone**",
+  "strip_prefix": "{REPO}-{VERSION}",
+  "url": "https://github.com/{OWNER}/{REPO}/releases/download/{TAG}/rules_runfiles_group-{TAG}.tar.gz",
+  "docs_url": "https://github.com/{OWNER}/{REPO}/releases/download/{TAG}/rules_runfiles_group-{TAG}.docs.tar.gz"
+}

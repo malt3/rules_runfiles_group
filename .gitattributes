@@ -1,0 +1,3 @@
+# Exclude dev directories from release archives
+.docextract export-ignore
+.bcr export-ignore
