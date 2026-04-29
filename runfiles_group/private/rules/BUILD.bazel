@@ -1,0 +1,11 @@
+load("@bazel_skylib//:bzl_library.bzl", "bzl_library")
+
+bzl_library(
+    name = "runfiles_group_analysis_test",
+    srcs = ["runfiles_group_analysis_test.bzl"],
+    visibility = ["//:__subpackages__"],
+    deps = [
+        "//runfiles_group/private/providers:runfiles_group_info",
+        "@bazel_skylib//lib:sets",
+    ],
+)

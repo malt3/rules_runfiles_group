@@ -1,0 +1,17 @@
+starlark_doc_extract(
+    name = "providers",
+    src = "//runfiles_group:providers.bzl",
+    deps = ["//runfiles_group:providers"],
+)
+
+starlark_doc_extract(
+    name = "lib",
+    src = "//runfiles_group:lib.bzl",
+    deps = ["//runfiles_group:lib"],
+)
+
+starlark_doc_extract(
+    name = "runfiles_group_analysis_test",
+    src = "//runfiles_group:runfiles_group_analysis_test.bzl",
+    deps = ["//runfiles_group:runfiles_group_analysis_test"],
+)

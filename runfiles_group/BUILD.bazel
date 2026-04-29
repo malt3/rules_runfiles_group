@@ -1,5 +1,14 @@
 load("@bazel_skylib//:bzl_library.bzl", "bzl_library")
 
+exports_files(
+    srcs = [
+        "lib.bzl",
+        "providers.bzl",
+        "runfiles_group_analysis_test.bzl",
+    ],
+    visibility = ["//visibility:public"],
+)
+
 bzl_library(
     name = "providers",
     srcs = ["providers.bzl"],
@@ -17,5 +26,14 @@ bzl_library(
     visibility = ["//visibility:public"],
     deps = [
         "//runfiles_group/private:lib",
+    ],
+)
+
+bzl_library(
+    name = "runfiles_group_analysis_test",
+    srcs = ["runfiles_group_analysis_test.bzl"],
+    visibility = ["//visibility:public"],
+    deps = [
+        "//runfiles_group/private/rules:runfiles_group_analysis_test",
     ],
 )
