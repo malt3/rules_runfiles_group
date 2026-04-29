@@ -106,6 +106,31 @@ To decide which groups to merge, calculate the "weight" of each group. Two recom
 
 Groups with large weight should be left unmerged. They benefit most from being cached as separate entities. Lightweight groups should be merged first, as combining them has minimal impact on cache efficiency.
 
+### Testing your implementation
+
+Use `runfiles_group_analysis_test` to verify that your `*_binary` rule produces a valid `RunfilesGroupInfo`. The test checks two properties:
+
+1. **Completeness.** The union of all groups must equal `DefaultInfo.default_runfiles.files` exactly — no missing files, no extra files.
+2. **Overlap.** It detects files that appear in more than one group. The `overlapping_group_behavior` attribute controls whether overlaps produce warnings (default) or hard failures.
+
+When a check fails, the test prints the target label and lists the offending files so you can trace them back to the rule logic that produced them.
+
+> [!CAUTION]
+> This test materializes every depset to compare file sets, making it expensive on large targets. It is meant for rule authors validating their implementation in internal test suites, not for end users running it on every `*_binary` in a production build.
+
+```starlark
+load("@rules_runfiles_group//runfiles_group:runfiles_group_analysis_test.bzl", "runfiles_group_analysis_test")
+
+runfiles_group_analysis_test(
+    name = "test_runfiles_group_invariants",
+    binaries = [
+        ":my_binary",
+        ":my_other_binary",
+    ],
+    overlapping_group_behavior = "error",
+)
+```
+
 ---
 
 ## Guidance for package rule authors
