@@ -16,6 +16,7 @@ jobs:
       release_files: rules_runfiles_group-*.tar.gz
       prerelease: false
       tag_name: ${{ inputs.tag_name || github.ref_name }}
+      bazel_test_command: "bazel build //..."
   publish:
     needs: release
     uses: ./.github/workflows/publish.yml
