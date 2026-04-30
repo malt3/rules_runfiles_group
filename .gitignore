@@ -1,4 +1,4 @@
 /bazel-*
 /example/bazel-*
 /example/producer/stlib_repo/MODULE.bazel*
-/MODULE.bazel.lock
+MODULE.bazel.lock
