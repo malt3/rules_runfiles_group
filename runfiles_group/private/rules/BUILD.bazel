@@ -5,6 +5,7 @@ bzl_library(
     srcs = ["runfiles_group_analysis_test.bzl"],
     visibility = ["//:__subpackages__"],
     deps = [
+        "//runfiles_group/private:lib",
         "//runfiles_group/private/providers:runfiles_group_info",
         "@bazel_skylib//lib:sets",
     ],

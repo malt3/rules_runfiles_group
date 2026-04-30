@@ -1,6 +1,7 @@
 """Implementation of the starlark_binary rule."""
 
 load("@hermetic_launcher//launcher:lib.bzl", "launcher")
+load("@rules_runfiles_group//runfiles_group:lib.bzl", "lib")
 load("@rules_runfiles_group//runfiles_group:providers.bzl", "RunfilesGroupInfo", "RunfilesGroupSelectionInfo")
 load("//producer/providers:providers.bzl", "StarlarkInfo")
 
@@ -103,7 +104,7 @@ def _starlark_binary_impl(ctx):
             ranks["entrypoint"] = 3
             for dep in ctx.attr.deps:
                 if RunfilesGroupInfo in dep:
-                    for name in dir(dep[RunfilesGroupInfo]):
+                    for name in lib.group_names(dep[RunfilesGroupInfo]):
                         groups[name] = getattr(dep[RunfilesGroupInfo], name)
                         if _extract_repo(name) == current_repo:
                             ranks[name] = 3
@@ -115,7 +116,7 @@ def _starlark_binary_impl(ctx):
             ranks[current_repo] = 3
             for dep in ctx.attr.deps:
                 if RunfilesGroupInfo in dep:
-                    for name in dir(dep[RunfilesGroupInfo]):
+                    for name in lib.group_names(dep[RunfilesGroupInfo]):
                         repo = _extract_repo(name)
                         if repo not in repo_depsets:
                             repo_depsets[repo] = []

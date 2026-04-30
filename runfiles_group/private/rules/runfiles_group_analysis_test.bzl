@@ -17,6 +17,7 @@ runfiles_group_analysis_test(
 """
 
 load("@bazel_skylib//lib:sets.bzl", "sets")
+load("//runfiles_group/private:lib.bzl", "lib")
 load("//runfiles_group/private/providers:runfiles_group_info.bzl", "RunfilesGroupInfo")
 
 _INDENT = "    "
@@ -32,12 +33,13 @@ def _test_one(ctx, binary_attr):
     runfiles_group_info = binary_attr[RunfilesGroupInfo]
     if default_runfiles == None:
         return (False, ["doesn't have default_runfiles to compare to."])
+
     # Note: the following calculations are expensive.
     # This analysis test is only meant to be used to test the correctness of
     # RunfilesGroupInfo emitting rules. Do not use for all of your *_binary targets in prod.
     all_default_runfiles = sets.make(default_runfiles.files.to_list())
     all_grouped_runfiles = sets.make()
-    for group_depset_name in dir(runfiles_group_info):
+    for group_depset_name in lib.group_names(runfiles_group_info):
         group_depset = getattr(runfiles_group_info, group_depset_name)
         for file_from_group in group_depset.to_list():
             sets.insert(all_grouped_runfiles, file_from_group)
@@ -61,7 +63,7 @@ def _test_one(ctx, binary_attr):
             )
 
     if ctx.attr.overlapping_group_behavior != "ignore":
-        group_names = dir(runfiles_group_info)
+        group_names = lib.group_names(runfiles_group_info)
         for i in range(len(group_names)):
             group_i = sets.make(getattr(runfiles_group_info, group_names[i]).to_list())
             for j in range(i + 1, len(group_names)):
@@ -84,15 +86,13 @@ def _test_one(ctx, binary_attr):
 
     return (success, issues)
 
-
-
 def _runfiles_group_analysis_test_impl(ctx):
     if len(ctx.attr.binaries) == 0:
         return [AnalysisTestResultInfo(
             success = False,
             message = "runfiles_group_analysis_test with no binaries.",
         )]
-    
+
     results = []
     for binary_attr in ctx.attr.binaries:
         results.append((binary_attr.label, _test_one(ctx, binary_attr)))
@@ -109,7 +109,7 @@ def _runfiles_group_analysis_test_impl(ctx):
                         "\n".join([_indent(issue) for issue in result[1]]),
                     ),
                 )
-    
+
     return [AnalysisTestResultInfo(
         success = success,
         message = "\n".join(sections),

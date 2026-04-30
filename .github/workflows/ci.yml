@@ -7,6 +7,17 @@ on:
 jobs:
   test:
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        bazel_version:
+          - "7.x"
+          - "8.x"
+          - "9.x"
+          - "latest"
+          - "rolling"
+    env:
+      USE_BAZEL_VERSION: ${{ matrix.bazel_version }}
     steps:
       - uses: actions/checkout@v4
       - run: bazel build //...

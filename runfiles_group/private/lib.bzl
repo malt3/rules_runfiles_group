@@ -1,5 +1,8 @@
 """Library for consuming and transforming RunfilesGroupInfo.
 
+lib.group_names(runfiles_group_info)
+    Returns the list of group names in a RunfilesGroupInfo instance.
+
 lib.ordered_groups(runfiles_group_info, selection_info = None)
     Returns a list of (group_name, depset[File]) tuples, filtered and
     sorted according to the selection. If selection_info is None, all
@@ -25,10 +28,18 @@ lib.transform_groups(runfiles_group_info, transform_info = None)
         Calls transform(runfiles_group_info) and returns the result.
 """
 
+load("@bazel_features//:features.bzl", "bazel_features")
 load("//runfiles_group/private/providers:runfiles_group_info.bzl", "RunfilesGroupInfo")
 
+# Bazel < 9 includes to_json/to_proto in dir() results for providers.
+_PROVIDER_BUILTINS = [] if bazel_features.rules.no_struct_field_denylist else ["to_json", "to_proto"]
+
+def _group_names(runfiles_group_info):
+    """Returns the list of group names in a RunfilesGroupInfo instance."""
+    return [n for n in dir(runfiles_group_info) if n not in _PROVIDER_BUILTINS]
+
 def _ordered_groups(runfiles_group_info, runfiles_group_selection_info = None):
-    all_names = dir(runfiles_group_info)
+    all_names = _group_names(runfiles_group_info)
     selection = runfiles_group_selection_info
 
     if selection == None:
@@ -74,7 +85,7 @@ def _transform_groups(runfiles_group_info, runfiles_transform_info = None):
 
     merge_groups = runfiles_transform_info.merge_groups
     treatment = runfiles_transform_info.unmatched_group_treatment
-    all_names = dir(runfiles_group_info)
+    all_names = _group_names(runfiles_group_info)
     all_names_set = {name: True for name in all_names}
 
     matched = {}
@@ -105,6 +116,7 @@ def _transform_groups(runfiles_group_info, runfiles_transform_info = None):
     return RunfilesGroupInfo(**result)
 
 lib = struct(
+    group_names = _group_names,
     ordered_groups = _ordered_groups,
     transform_groups = _transform_groups,
 )
