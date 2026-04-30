@@ -1,5 +1,6 @@
 """Implementation of the starlark_library rule."""
 
+load("@rules_runfiles_group//runfiles_group:lib.bzl", "lib")
 load("@rules_runfiles_group//runfiles_group:providers.bzl", "RunfilesGroupInfo")
 load("//producer/providers:providers.bzl", "StarlarkInfo")
 
@@ -26,7 +27,7 @@ def _starlark_library_impl(ctx):
     groups = {}
     for dep in ctx.attr.deps:
         if RunfilesGroupInfo in dep:
-            for name in dir(dep[RunfilesGroupInfo]):
+            for name in lib.group_names(dep[RunfilesGroupInfo]):
                 groups[name] = getattr(dep[RunfilesGroupInfo], name)
 
     groups[str(ctx.label)] = depset(direct_srcs + ctx.files.data)
