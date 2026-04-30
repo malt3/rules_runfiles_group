@@ -4,6 +4,9 @@ load("@rules_runfiles_group//runfiles_group:lib.bzl", "lib")
 load("@rules_runfiles_group//runfiles_group:providers.bzl", "RunfilesGroupInfo")
 load("//producer/providers:providers.bzl", "StarlarkInfo")
 
+def _canonical_repo_name(ctx):
+    return ctx.label.repo_name or "_main"
+
 def _starlark_library_impl(ctx):
     direct_srcs = ctx.files.srcs
 
@@ -11,7 +14,8 @@ def _starlark_library_impl(ctx):
     all_sources = depset(direct_srcs, transitive = transitive_sources)
 
     transitive_repos = [dep[StarlarkInfo].repos for dep in ctx.attr.deps]
-    repos = depset([(ctx.attr.repository, ctx.label.repo_name)], transitive = transitive_repos)
+    current_repo = _canonical_repo_name(ctx)
+    repos = depset([(ctx.attr.repository, current_repo)], transitive = transitive_repos)
 
     if ctx.attr.repository:
         loadpath = "@" + ctx.attr.repository + "//" + ctx.label.package

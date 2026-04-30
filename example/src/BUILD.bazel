@@ -1,11 +1,32 @@
+load("@bazel_skylib//rules:expand_template.bzl", "expand_template")
 load("@rules_runfiles_group//runfiles_group:runfiles_group_analysis_test.bzl", "runfiles_group_analysis_test")
 load("//consumer/rules:fake_package.bzl", "fake_package")
 load("//producer/rules:skip_interpreter.bzl", "skip_interpreter")
 load("//producer/rules:starlark_binary.bzl", "starlark_binary")
 load("//producer/rules:starlark_library.bzl", "starlark_library")
 
+package(default_visibility = ["//visibility:public"])
+
 # This is a mixin users can add to aspect_hints of a binary target to skip the interpreter group.
 skip_interpreter(name = "skip_interpreter")
+
+repo = repo_name() if repo_name() != "" else "_main"
+
+# Work with generated source files
+expand_template(
+    name = "lib_a_generator",
+    out = "lib_a.star",
+    substitutions = {"{repo_name}": repo},
+    template = "lib_a.star.tpl",
+)
+
+# Work with generated source files
+expand_template(
+    name = "lib_b_generator",
+    out = "lib_b.star",
+    substitutions = {"{repo_name}": repo},
+    template = "lib_b.star.tpl",
+)
 
 starlark_library(
     name = "lib_a",
@@ -46,6 +67,9 @@ starlark_binary(
     name = "hasher",
     src = "hasher.star",
     data = ["@irs_f1040//file"],
+    properties = {
+        "IRS_F1040_PATH": "$(rlocationpath @irs_f1040//file)",
+    },
 )
 
 starlark_binary(
