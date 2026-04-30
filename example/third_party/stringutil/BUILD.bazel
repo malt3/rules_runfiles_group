@@ -1,5 +1,4 @@
-# buildifier: disable=canonical-repository
-load("@@//producer/rules:starlark_library.bzl", "starlark_library")
+load("@rules_runfiles_group_example//producer/rules:starlark_library.bzl", "starlark_library")
 
 starlark_library(
     name = "stringutil",
