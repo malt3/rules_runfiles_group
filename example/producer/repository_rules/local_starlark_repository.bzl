@@ -4,7 +4,6 @@ def _local_starlark_repository_impl(rctx):
     rctx.watch(repo_root)
     rctx.symlink(repo_root, ".")
 
-
 local_starlark_repository = repository_rule(
     implementation = _local_starlark_repository_impl,
     attrs = {"repo_file": attr.label(

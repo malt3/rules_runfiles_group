@@ -5,18 +5,22 @@ load("@rules_runfiles_group//runfiles_group:lib.bzl", "lib")
 load("@rules_runfiles_group//runfiles_group:providers.bzl", "RunfilesGroupInfo", "RunfilesGroupSelectionInfo")
 load("//producer/providers:providers.bzl", "StarlarkInfo")
 
+def _canonical_repo_name(ctx):
+    return ctx.label.repo_name or "_main"
+
 def _starlark_binary_impl(ctx):
     interpreter_info = ctx.attr.interpreter[DefaultInfo]
     interpreter_exe = interpreter_info.files_to_run.executable
     entrypoint = ctx.file.src
+    current_repo = _canonical_repo_name(ctx)
 
     # Collect repos from all deps + self + standard library
     transitive_repos = [dep[StarlarkInfo].repos for dep in ctx.attr.deps]
     stdlib = ctx.attr._standard_library
     all_repos = depset(
         [
-            (ctx.attr.repository, ctx.label.repo_name),
-            ("std", stdlib.label.repo_name),
+            (ctx.attr.repository, current_repo),
+            ("std", stdlib.label.repo_name or "_main"),
         ],
         transitive = transitive_repos,
     )
@@ -38,8 +42,30 @@ def _starlark_binary_impl(ctx):
         progress_message = "Generating loadmap for %{label}",
     )
 
-    # Build launcher stub: interpreter --loadmap <loadmap> <entrypoint>
+    # Write properties file
+    properties = ctx.actions.declare_file(ctx.label.name + ".properties.json")
+    expanded_props = {}
+    for k, v in ctx.attr.properties.items():
+        expanded_props[k] = ctx.expand_location(v, ctx.attr.data)
+    ctx.actions.write(properties, json.encode(expanded_props))
+
+    # Build launcher stub: interpreter --repo <repo> --loadmap <loadmap> --properties <props> <entrypoint_label>
+    if ctx.attr.repository:
+        entry_label = "@" + ctx.attr.repository + "//" + entrypoint.owner.package + ":" + entrypoint.owner.name
+    else:
+        entry_label = "//" + entrypoint.owner.package + ":" + entrypoint.owner.name
+
     embedded_args, transformed_args = launcher.args_from_entrypoint(interpreter_exe)
+    embedded_args, transformed_args = launcher.append_embedded_arg(
+        arg = "--repo",
+        embedded_args = embedded_args,
+        transformed_args = transformed_args,
+    )
+    embedded_args, transformed_args = launcher.append_embedded_arg(
+        arg = current_repo,
+        embedded_args = embedded_args,
+        transformed_args = transformed_args,
+    )
     embedded_args, transformed_args = launcher.append_embedded_arg(
         arg = "--loadmap",
         embedded_args = embedded_args,
@@ -50,8 +76,18 @@ def _starlark_binary_impl(ctx):
         embedded_args = embedded_args,
         transformed_args = transformed_args,
     )
+    embedded_args, transformed_args = launcher.append_embedded_arg(
+        arg = "--properties",
+        embedded_args = embedded_args,
+        transformed_args = transformed_args,
+    )
     embedded_args, transformed_args = launcher.append_runfile(
-        file = entrypoint,
+        file = properties,
+        embedded_args = embedded_args,
+        transformed_args = transformed_args,
+    )
+    embedded_args, transformed_args = launcher.append_embedded_arg(
+        arg = entry_label,
         embedded_args = embedded_args,
         transformed_args = transformed_args,
     )
@@ -66,7 +102,7 @@ def _starlark_binary_impl(ctx):
     )
 
     # Runfiles: interpreter + entrypoint + loadmap + stdlib + data + all deps
-    runfiles = ctx.runfiles(files = [entrypoint, loadmap] + ctx.files.data)
+    runfiles = ctx.runfiles(files = [entrypoint, loadmap, properties] + ctx.files.data)
     runfiles = runfiles.merge(interpreter_info.default_runfiles)
     runfiles = runfiles.merge(stdlib[DefaultInfo].default_runfiles)
     for dep in ctx.attr.deps:
@@ -94,10 +130,9 @@ def _starlark_binary_impl(ctx):
         # Special group: std
         groups["std"] = stdlib[DefaultInfo].default_runfiles.files
 
-        entrypoint_files = depset([output, entrypoint, loadmap] + ctx.files.data)
+        entrypoint_files = depset([output, entrypoint, loadmap, properties] + ctx.files.data)
 
         # Dep groups
-        current_repo = ctx.label.repo_name
         if ctx.attr.runfiles_grouping == "by_target":
             # Keep a separate entrypoint group in by_target mode.
             groups["entrypoint"] = entrypoint_files
@@ -175,6 +210,9 @@ starlark_binary = rule(
         "data": attr.label_list(
             allow_files = True,
             doc = "Data files available at runtime.",
+        ),
+        "properties": attr.string_dict(
+            doc = "Key-value properties accessible via get_property() at runtime. Values support $(location) expansion.",
         ),
         "interpreter": attr.label(
             default = Label("//producer/interpreter"),
