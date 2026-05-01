@@ -16,6 +16,7 @@ local_starlark_repository = use_repo_rule("//producer/repository_rules:local_sta
 
 local_starlark_repository(
     name = "std",
+    copy_files = {"@sha256.bzl//:sha256.star": "sha256/sha256.star"},
     repo_file = "//producer:stdlib_repo/REPO.bazel",
 )
 
@@ -27,6 +28,31 @@ local_starlark_repository(
 local_starlark_repository(
     name = "stringutil",
     repo_file = "//:third_party/stringutil/REPO.bazel",
+)
+
+local_starlark_repository(
+    name = "mathlib",
+    repo_file = "//:third_party/mathlib/REPO.bazel",
+)
+
+local_starlark_repository(
+    name = "templates",
+    repo_file = "//:third_party/templates/REPO.bazel",
+)
+
+local_starlark_repository(
+    name = "colors",
+    repo_file = "//:third_party/colors/REPO.bazel",
+)
+
+local_starlark_repository(
+    name = "units",
+    repo_file = "//:third_party/units/REPO.bazel",
+)
+
+local_starlark_repository(
+    name = "limits",
+    repo_file = "//:third_party/limits/REPO.bazel",
 )
 
 http_file = use_repo_rule("@bazel_tools//tools/build_defs/repo:http.bzl", "http_file")

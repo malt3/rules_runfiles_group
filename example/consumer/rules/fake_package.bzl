@@ -4,7 +4,7 @@ load("@rules_runfiles_group//runfiles_group:lib.bzl", "lib")
 load(
     "@rules_runfiles_group//runfiles_group:providers.bzl",
     "RunfilesGroupInfo",
-    "RunfilesGroupSelectionInfo",
+    "RunfilesGroupMetadataInfo",
     "RunfilesGroupTransformInfo",
 )
 
@@ -16,32 +16,28 @@ _FakePackageGroupsInfo = provider(
 )
 
 def _fake_package_aspect_impl(target, ctx):
-    # 1. Obtain RunfilesGroupInfo: from target, overridden by last aspect_hint.
-    rgi = None
-    if RunfilesGroupInfo in target:
-        rgi = target[RunfilesGroupInfo]
-    for hint in ctx.rule.attr.aspect_hints:
-        if RunfilesGroupInfo in hint:
-            rgi = hint[RunfilesGroupInfo]
-
-    if rgi == None:
+    # 1. Obtain RunfilesGroupInfo from the target.
+    if RunfilesGroupInfo not in target:
         return []
+    rgi = target[RunfilesGroupInfo]
 
-    # 2. Apply all transforms from aspect_hints.
+    # 2. Accumulate metadata via dict merge (binary + all hints, last-wins per key).
+    metadata = None
+    if RunfilesGroupMetadataInfo in target:
+        metadata = target[RunfilesGroupMetadataInfo]
+    for hint in ctx.rule.attr.aspect_hints:
+        if RunfilesGroupMetadataInfo in hint:
+            metadata = lib.merge_metadata(metadata, hint[RunfilesGroupMetadataInfo])
+
+    # 3. Apply all transforms (new signature: (rgi, metadata) -> struct).
     for hint in ctx.rule.attr.aspect_hints:
         if RunfilesGroupTransformInfo in hint:
-            rgi = lib.transform_groups(rgi, hint[RunfilesGroupTransformInfo])
+            result = lib.transform_groups(rgi, metadata, hint[RunfilesGroupTransformInfo])
+            rgi = result.runfiles_group_info
+            metadata = result.runfiles_group_metadata_info
 
-    # 3. Find the last selection from [target, ...aspect_hints].
-    selection = None
-    if RunfilesGroupSelectionInfo in target:
-        selection = target[RunfilesGroupSelectionInfo]
-    for hint in ctx.rule.attr.aspect_hints:
-        if RunfilesGroupSelectionInfo in hint:
-            selection = hint[RunfilesGroupSelectionInfo]
-
-    # 4. Apply ordering.
-    ordered = lib.ordered_groups(rgi, selection)
+    # 4. Apply ordering by rank.
+    ordered = lib.ordered_groups(rgi, metadata)
 
     return [_FakePackageGroupsInfo(ordered_groups = ordered)]
 

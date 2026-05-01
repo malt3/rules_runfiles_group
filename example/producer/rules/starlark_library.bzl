@@ -1,7 +1,7 @@
 """Implementation of the starlark_library rule."""
 
 load("@rules_runfiles_group//runfiles_group:lib.bzl", "lib")
-load("@rules_runfiles_group//runfiles_group:providers.bzl", "RunfilesGroupInfo")
+load("@rules_runfiles_group//runfiles_group:providers.bzl", "RunfilesGroupInfo", "RunfilesGroupMetadataInfo")
 load("//producer/providers:providers.bzl", "StarlarkInfo")
 
 def _canonical_repo_name(ctx):
@@ -28,13 +28,26 @@ def _starlark_library_impl(ctx):
     for dep in ctx.attr.data:
         runfiles = runfiles.merge(dep[DefaultInfo].default_runfiles)
 
+    group_name = loadpath + ":" + ctx.label.name
+
     groups = {}
     for dep in ctx.attr.deps:
         if RunfilesGroupInfo in dep:
             for name in lib.group_names(dep[RunfilesGroupInfo]):
                 groups[name] = getattr(dep[RunfilesGroupInfo], name)
 
-    groups[str(ctx.label)] = depset(direct_srcs + ctx.files.data)
+    groups[group_name] = depset(direct_srcs + ctx.files.data)
+
+    metadata = None
+    for dep in ctx.attr.deps:
+        if RunfilesGroupMetadataInfo in dep:
+            metadata = lib.merge_metadata(metadata, dep[RunfilesGroupMetadataInfo])
+
+    own_weight = ctx.attr.runfiles_weight if ctx.attr.runfiles_weight > 0 else None
+    own_metadata = RunfilesGroupMetadataInfo(groups = {
+        group_name: lib.group_metadata(weight = own_weight),
+    })
+    metadata = lib.merge_metadata(metadata, own_metadata)
 
     return [
         DefaultInfo(
@@ -47,6 +60,7 @@ def _starlark_library_impl(ctx):
             repos = repos,
         ),
         RunfilesGroupInfo(**groups),
+        RunfilesGroupMetadataInfo(groups = metadata.groups),
     ]
 
 starlark_library = rule(
@@ -67,6 +81,10 @@ starlark_library = rule(
         "repository": attr.string(
             default = "",
             doc = "Repository name for the load path. If empty, loadpath is '//package'. If set, loadpath is '@repository//package'.",
+        ),
+        "runfiles_weight": attr.int(
+            default = 0,
+            doc = "Weight hint for this library's runfiles group. If > 0, set as the weight in RunfilesGroupMetadataInfo.",
         ),
     },
 )

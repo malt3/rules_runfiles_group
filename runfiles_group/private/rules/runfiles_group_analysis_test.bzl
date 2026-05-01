@@ -19,11 +19,15 @@ runfiles_group_analysis_test(
 load("@bazel_skylib//lib:sets.bzl", "sets")
 load("//runfiles_group/private:lib.bzl", "lib")
 load("//runfiles_group/private/providers:runfiles_group_info.bzl", "RunfilesGroupInfo")
+load("//runfiles_group/private/providers:runfiles_group_metadata_info.bzl", "RunfilesGroupMetadataInfo")
 
 _INDENT = "    "
 
 def _indent(text):
     return "\n".join([_INDENT + line for line in text.split("\n")])
+
+def _join_group_names(lighter_name, _lighter_weight, heavier_name, _heavier_weight):
+    return lighter_name + "+" + heavier_name
 
 def _test_one(ctx, binary_attr):
     issues = []
@@ -84,6 +88,50 @@ def _test_one(ctx, binary_attr):
                         # buildifier: disable=print
                         print("WARNING [{}]: {}".format(binary_attr.label, msg))
 
+    # Apply the full resolution protocol (merge + ordering) and check expected group names.
+    rgi = runfiles_group_info
+    metadata = binary_attr[RunfilesGroupMetadataInfo] if RunfilesGroupMetadataInfo in binary_attr else None
+
+    if ctx.attr.max_groups >= 0:
+        merged = lib.merge_to_limit(
+            rgi,
+            metadata,
+            max_groups = ctx.attr.max_groups,
+            merged_group_name = _join_group_names,
+        )
+        rgi = merged.runfiles_group_info
+        metadata = merged.runfiles_group_metadata_info
+        if ctx.attr.expected_group_count >= 0:
+            if merged.group_count != ctx.attr.expected_group_count:
+                success = False
+                issues.append(
+                    "expected {} groups after merging but got {}".format(
+                        ctx.attr.expected_group_count,
+                        merged.group_count,
+                    ),
+                )
+        elif merged.group_count > ctx.attr.max_groups:
+            success = False
+            issues.append(
+                "max_groups={} requested but merging could only reduce to {} groups".format(
+                    ctx.attr.max_groups,
+                    merged.group_count,
+                ),
+            )
+
+    ordered = lib.ordered_groups(rgi, metadata)
+    actual_names = [name for name, _ in ordered]
+
+    if ctx.attr.expected_group_names:
+        if actual_names != ctx.attr.expected_group_names:
+            success = False
+            issues.append(
+                "expected ordered group names:\n" +
+                _INDENT + str(ctx.attr.expected_group_names) + "\n" +
+                "actual ordered group names:\n" +
+                _INDENT + str(actual_names),
+            )
+
     return (success, issues)
 
 def _runfiles_group_analysis_test_impl(ctx):
@@ -121,7 +169,9 @@ runfiles_group_analysis_test = rule(
 Checks that RunfilesGroupInfo is well formed by comparing the runfiles of the executable (DefaultInfo.default_runfiles.files)
 with the union of all runfiles from RunfilesGroupInfo.
 
-Additionally, it can warn about files appearing in multiple groups (overlapping).
+Additionally, it can warn about files appearing in multiple groups (overlapping),
+verify the expected ordered group names after applying the full resolution protocol,
+and optionally apply merge-to-limit before ordering.
 """,
     attrs = {
         "binaries": attr.label_list(
@@ -134,6 +184,24 @@ Additionally, it can warn about files appearing in multiple groups (overlapping)
             doc = "How to handle overlapping groups (the same file being present in more than one group).",
             default = "warn",
             values = ["warn", "ignore", "error"],
+        ),
+        "expected_group_names": attr.string_list(
+            doc = """\
+If set, the test verifies that the ordered group names (after optional merging and rank-based ordering)
+match this list exactly. Applies to all binaries in the test.
+""",
+        ),
+        "max_groups": attr.int(
+            doc = "If >= 0, apply lib.merge_to_limit with this limit before ordering. -1 means no limit.",
+            default = -1,
+        ),
+        "expected_group_count": attr.int(
+            doc = """\
+If >= 0, verify the exact number of groups after merging (requires max_groups >= 0).
+Use this when merging cannot reach max_groups (e.g., due to do_not_merge or rank constraints)
+to assert the actual reachable count. -1 means no check (the test fails if group_count > max_groups instead).
+""",
+            default = -1,
         ),
     },
     analysis_test = True,

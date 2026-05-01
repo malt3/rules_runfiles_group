@@ -7,8 +7,8 @@ bzl_library(
 )
 
 bzl_library(
-    name = "runfiles_group_selection_info",
-    srcs = ["runfiles_group_selection_info.bzl"],
+    name = "runfiles_group_metadata_info",
+    srcs = ["runfiles_group_metadata_info.bzl"],
     visibility = ["//:__subpackages__"],
 )
 
