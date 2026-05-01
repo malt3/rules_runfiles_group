@@ -7,7 +7,7 @@ _DOC = """\
 Information about grouped runfiles.
 
 Each field in this provider is a depset of File objects, representing a category of runfiles.
-Merging all depsets from all fields should yield the same set (or a superset) of files as DefaultInfo.default_runfiles.
+Merging all depsets from all fields must yield the same set of files as DefaultInfo.default_runfiles.
 
 This provider functions similarly to OutputGroupInfo, but its presence in the output of a rule indicates that it can be used instead of DefaultInfo.default_runfiles.
 It categorizes the runfiles of a target into different groups, allowing for more fine-grained control over which runfiles are used in different contexts.

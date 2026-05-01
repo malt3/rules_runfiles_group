@@ -2,7 +2,7 @@
 
 load("@hermetic_launcher//launcher:lib.bzl", "launcher")
 load("@rules_runfiles_group//runfiles_group:lib.bzl", "lib")
-load("@rules_runfiles_group//runfiles_group:providers.bzl", "RunfilesGroupInfo", "RunfilesGroupSelectionInfo")
+load("@rules_runfiles_group//runfiles_group:providers.bzl", "RunfilesGroupInfo", "RunfilesGroupMetadataInfo")
 load("//producer/providers:providers.bzl", "StarlarkInfo")
 
 def _canonical_repo_name(ctx):
@@ -119,36 +119,47 @@ def _starlark_binary_impl(ctx):
 
     if ctx.attr.runfiles_grouping != "disabled":
         groups = {}
-        ranks = {"interpreter": 0, "std": 1}
+
+        # Collect metadata from deps (carries weight from starlark_library).
+        dep_metadata = None
+        for dep in ctx.attr.deps:
+            if RunfilesGroupMetadataInfo in dep:
+                dep_metadata = lib.merge_metadata(dep_metadata, dep[RunfilesGroupMetadataInfo])
+
+        metadata = {}
+        own_repo = ctx.attr.repository
 
         # Special group: interpreter
         groups["interpreter"] = depset(
             [interpreter_exe],
             transitive = [interpreter_info.default_runfiles.files],
         )
+        metadata["interpreter"] = lib.group_metadata(rank = -2, do_not_merge = True)
 
         # Special group: std
         groups["std"] = stdlib[DefaultInfo].default_runfiles.files
+        metadata["std"] = lib.group_metadata(rank = -1)
 
         entrypoint_files = depset([output, entrypoint, loadmap, properties] + ctx.files.data)
 
         # Dep groups
         if ctx.attr.runfiles_grouping == "by_target":
-            # Keep a separate entrypoint group in by_target mode.
             groups["entrypoint"] = entrypoint_files
-            ranks["entrypoint"] = 3
+            metadata["entrypoint"] = lib.group_metadata(rank = 2)
             for dep in ctx.attr.deps:
                 if RunfilesGroupInfo in dep:
                     for name in lib.group_names(dep[RunfilesGroupInfo]):
                         groups[name] = getattr(dep[RunfilesGroupInfo], name)
-                        if _extract_repo(name) == current_repo:
-                            ranks[name] = 3
+                        dep_weight = _get_dep_weight(dep_metadata, name)
+                        if _extract_repo(name) == own_repo:
+                            metadata[name] = lib.group_metadata(rank = 1, weight = dep_weight)
+                        elif dep_weight != None:
+                            metadata[name] = lib.group_metadata(weight = dep_weight)
 
         elif ctx.attr.runfiles_grouping == "by_repo":
-            # Merge entrypoint into the current repo group.
             repo_depsets = {}
-            repo_depsets[current_repo] = [entrypoint_files]
-            ranks[current_repo] = 3
+            repo_weights = {}
+            repo_depsets[own_repo] = [entrypoint_files]
             for dep in ctx.attr.deps:
                 if RunfilesGroupInfo in dep:
                     for name in lib.group_names(dep[RunfilesGroupInfo]):
@@ -156,43 +167,44 @@ def _starlark_binary_impl(ctx):
                         if repo not in repo_depsets:
                             repo_depsets[repo] = []
                         repo_depsets[repo].append(getattr(dep[RunfilesGroupInfo], name))
+                        w = _get_dep_weight(dep_metadata, name)
+                        if w != None:
+                            repo_weights[repo] = repo_weights.get(repo, 0) + w
             for repo, ds in repo_depsets.items():
-                groups[repo] = depset(transitive = ds)
-                if repo == current_repo:
-                    ranks[repo] = 3
+                groups[repo or "_main"] = depset(transitive = ds)
+                if repo == own_repo:
+                    metadata[repo or "_main"] = lib.group_metadata(rank = 1, weight = repo_weights.get(repo, None))
+                elif repo in repo_weights:
+                    metadata[repo or "_main"] = lib.group_metadata(weight = repo_weights[repo])
 
         providers.append(RunfilesGroupInfo(**groups))
-        providers.append(RunfilesGroupSelectionInfo(
-            predicate = _predicate_all,
-            compare = lambda left, right: _compare_starlark_binary_order(ranks, left, right),
-        ))
+        providers.append(RunfilesGroupMetadataInfo(groups = metadata))
 
     return providers
 
-def _extract_repo(label_str):
-    idx = label_str.find("//")
-    if idx <= 0:
-        return "_main"
-    repo = label_str[:idx]
-    if repo.startswith("@@"):
-        repo = repo[2:]
-    elif repo.startswith("@"):
-        repo = repo[1:]
-    return repo if repo else "_main"
+def _extract_repo(group_name):
+    """Extracts the friendly repo name from a loadpath-based group name.
+
+    "@fizzbuzz//:fizzbuzz" -> "fizzbuzz"
+    "//src:lib_a" -> ""
+    """
+    if not group_name.startswith("@"):
+        return ""
+    idx = group_name.find("//")
+    if idx < 0:
+        return ""
+    return group_name[1:idx]
+
+def _get_dep_weight(dep_metadata, name):
+    if dep_metadata == None:
+        return None
+    entry = dep_metadata.groups.get(name, None)
+    if entry == None:
+        return None
+    return entry.weight
 
 def _format_repo(repo_tuple):
     return repo_tuple[0] + "\0" + repo_tuple[1]
-
-def _predicate_all(_):
-    return True
-
-# Rank: 0 = interpreter, 1 = std, 2 = third-party deps, 3 = current repo
-def _compare_starlark_binary_order(ranks, left, right):
-    left_rank = ranks.get(left, 2)
-    right_rank = ranks.get(right, 2)
-    if left_rank != right_rank:
-        return left_rank < right_rank
-    return left < right
 
 starlark_binary = rule(
     implementation = _starlark_binary_impl,

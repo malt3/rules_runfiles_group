@@ -3,33 +3,42 @@
 lib.group_names(runfiles_group_info)
     Returns the list of group names in a RunfilesGroupInfo instance.
 
-lib.ordered_groups(runfiles_group_info, selection_info = None)
-    Returns a list of (group_name, depset[File]) tuples, filtered and
-    sorted according to the selection. If selection_info is None, all
-    groups are included in lexicographic order.
+lib.ordered_groups(runfiles_group_info, metadata_info = None)
+    Returns a list of (group_name, depset[File]) tuples, ordered by rank
+    (ascending). Within the same rank, order is deterministc,
+    but consumers should not rely on intra-rank order.
 
-    The selection info supports two forms:
-      List form (group_names / extra_group_treatment):
-        Groups returned in the order given by group_names. Extras are
-        excluded, prepended, or appended (lexicographically).
-      Functional form (predicate / compare):
-        Groups filtered by predicate and sorted by compare.
+    If metadata_info is None, all groups are included in deterministic order.
+    Groups not present in metadata get default rank (0).
 
-lib.transform_groups(runfiles_group_info, transform_info = None)
-    Returns a new RunfilesGroupInfo with groups merged according to
-    the transform. If transform_info is None, returns the input unchanged.
+lib.transform_groups(runfiles_group_info, metadata_info = None, transform_info = None)
+    Applies a transform to (RunfilesGroupInfo, RunfilesGroupMetadataInfo).
+    Returns struct(runfiles_group_info, runfiles_group_metadata_info).
+    If transform_info is None, returns inputs unchanged.
 
-    The transform info supports two forms:
-      Dict form (merge_groups / unmatched_group_treatment):
-        Merges source groups into output groups per the mapping.
-        Unmatched groups are excluded, kept separate, or merged into
-        a default group.
-      Functional form (transform):
-        Calls transform(runfiles_group_info) and returns the result.
+lib.merge_to_limit(runfiles_group_info, metadata_info = None, max_groups, default_weight = 0, merged_group_name = None)
+    Merges groups to fit within max_groups. Groups at the same rank
+    without do_not_merge may be merged. Lighter groups (by weight) merge first.
+    Returns struct(runfiles_group_info, runfiles_group_metadata_info, group_count).
+    The caller must check group_count — if it exceeds max_groups, merging could
+    not reduce far enough (e.g., due to do_not_merge or groups in different ranks).
+    If merged_group_name is set, it is called as
+    merged_group_name(lighter_name, lighter_weight, heavier_name, heavier_weight)
+    to determine the name of the merged group. If None, the heavier group's name is kept.
+
+lib.merge_metadata(base, override)
+    Dict-merges two RunfilesGroupMetadataInfo instances (or None).
+    Returns RunfilesGroupMetadataInfo or None. Per-key last-wins.
 """
 
 load("@bazel_features//:features.bzl", "bazel_features")
 load("//runfiles_group/private/providers:runfiles_group_info.bzl", "RunfilesGroupInfo")
+load(
+    "//runfiles_group/private/providers:runfiles_group_metadata_info.bzl",
+    "DEFAULT_METADATA",
+    "RunfilesGroupMetadataInfo",
+    "group_metadata",
+)
 
 # Bazel < 9 includes to_json/to_proto in dir() results for providers.
 _PROVIDER_BUILTINS = [] if bazel_features.rules.no_struct_field_denylist else ["to_json", "to_proto"]
@@ -38,85 +47,144 @@ def _group_names(runfiles_group_info):
     """Returns the list of group names in a RunfilesGroupInfo instance."""
     return [n for n in dir(runfiles_group_info) if n not in _PROVIDER_BUILTINS]
 
-def _ordered_groups(runfiles_group_info, runfiles_group_selection_info = None):
+def _get_metadata(metadata_info, name):
+    if metadata_info == None:
+        return DEFAULT_METADATA
+    return metadata_info.groups.get(name, DEFAULT_METADATA)
+
+def _ordered_groups(runfiles_group_info, runfiles_group_metadata_info = None):
     all_names = _group_names(runfiles_group_info)
-    selection = runfiles_group_selection_info
 
-    if selection == None:
+    if runfiles_group_metadata_info == None:
         ordered = sorted(all_names)
-    elif selection.group_names != None:
-        all_names_set = {name: True for name in all_names}
-        listed = [name for name in selection.group_names if name in all_names_set]
-
-        if selection.extra_group_treatment == "exclude":
-            ordered = listed
-        else:
-            listed_set = {name: True for name in selection.group_names}
-            extras = sorted([name for name in all_names if name not in listed_set])
-            if selection.extra_group_treatment == "prepend":
-                ordered = extras + listed
-            else:
-                ordered = listed + extras
     else:
-        filtered = [name for name in all_names if selection.predicate(name)]
-        ordered = _sort_with_compare(filtered, selection.compare)
+        ordered = sorted(
+            all_names,
+            key = lambda name: (
+                _get_metadata(runfiles_group_metadata_info, name).rank,
+                name,
+            ),
+        )
 
     return [(name, getattr(runfiles_group_info, name)) for name in ordered]
 
-def _sort_with_compare(items, compare):
-    result = list(items)
-    for i in range(1, len(result)):
-        key = result[i]
-        insert_at = i
-        for j in range(i - 1, -1, -1):
-            if compare(key, result[j]):
-                result[j + 1] = result[j]
-                insert_at = j
-            else:
-                break
-        result[insert_at] = key
-    return result
-
-def _transform_groups(runfiles_group_info, runfiles_transform_info = None):
+def _transform_groups(runfiles_group_info, runfiles_group_metadata_info = None, runfiles_transform_info = None):
     if runfiles_transform_info == None:
-        return runfiles_group_info
-    if runfiles_transform_info.transform != None:
-        return runfiles_transform_info.transform(runfiles_group_info)
+        return struct(
+            runfiles_group_info = runfiles_group_info,
+            runfiles_group_metadata_info = runfiles_group_metadata_info,
+        )
+    return runfiles_transform_info.transform(runfiles_group_info, runfiles_group_metadata_info)
 
-    merge_groups = runfiles_transform_info.merge_groups
-    treatment = runfiles_transform_info.unmatched_group_treatment
-    all_names = _group_names(runfiles_group_info)
-    all_names_set = {name: True for name in all_names}
+def _effective_weight(entry, default_weight):
+    return entry.weight if entry.weight != None else default_weight
 
-    matched = {}
-    for source_names in merge_groups.values():
-        for source_name in source_names:
-            matched[source_name] = True
+def _find_cheapest_pair(groups, meta, default_weight):
+    """Finds the cheapest same-rank mergeable pair. Returns (lighter, heavier) or None."""
+    by_rank = {}
+    for name in groups:
+        entry = meta[name]
+        if entry.do_not_merge:
+            continue
+        rank = entry.rank
+        if rank not in by_rank:
+            by_rank[rank] = []
+        by_rank[rank].append(name)
 
-    result = {}
+    best_pair = None
+    best_cost = None
+    for rank, mergeable in by_rank.items():
+        if len(mergeable) < 2:
+            continue
+        weighted = sorted(
+            [((_effective_weight(meta[n], default_weight), n)) for n in mergeable],
+            key = lambda pair: (pair[0], pair[1]),
+        )
+        cost = weighted[0][0] + weighted[1][0]
+        if best_cost == None or cost < best_cost or (cost == best_cost and rank < best_pair[0]):
+            best_pair = (rank, weighted[0][1], weighted[1][1])
+            best_cost = cost
 
-    for out_name, source_names in merge_groups.items():
-        depsets = [getattr(runfiles_group_info, name) for name in source_names if name in all_names_set]
-        if depsets:
-            result[out_name] = depset(transitive = depsets)
+    if best_pair == None:
+        return None
 
-    unmatched = [name for name in all_names if name not in matched]
+    lighter_name = best_pair[1]
+    heavier_name = best_pair[2]
+    if _effective_weight(meta[lighter_name], default_weight) > _effective_weight(meta[heavier_name], default_weight):
+        return (heavier_name, lighter_name)
+    return (lighter_name, heavier_name)
 
-    if treatment == "keep_separate":
-        for name in unmatched:
-            result[name] = getattr(runfiles_group_info, name)
-    elif treatment == "merge_default":
-        default_depsets = [getattr(runfiles_group_info, name) for name in unmatched]
-        if default_depsets:
-            default_name = runfiles_transform_info.default_group_name
-            if default_name in result:
-                default_depsets.append(result[default_name])
-            result[default_name] = depset(transitive = default_depsets)
+def _merge_pair(groups, meta, lighter, heavier, default_weight, merged_group_name_fn):
+    """Merges lighter into heavier, returns new (groups, meta) dicts."""
+    merged_depset = depset(transitive = [groups[lighter], groups[heavier]])
+    merged_weight = _effective_weight(meta[lighter], default_weight) + \
+                    _effective_weight(meta[heavier], default_weight)
+    merged_entry = struct(
+        rank = meta[heavier].rank,
+        do_not_merge = False,
+        weight = merged_weight,
+    )
 
-    return RunfilesGroupInfo(**result)
+    if merged_group_name_fn != None:
+        lighter_w = _effective_weight(meta[lighter], default_weight)
+        heavier_w = _effective_weight(meta[heavier], default_weight)
+        out_name = merged_group_name_fn(lighter, lighter_w, heavier, heavier_w)
+    else:
+        out_name = heavier
+
+    new_groups = {n: d for n, d in groups.items() if n != lighter and n != heavier}
+    new_groups[out_name] = merged_depset
+    new_meta = {n: e for n, e in meta.items() if n != lighter and n != heavier}
+    new_meta[out_name] = merged_entry
+    return (new_groups, new_meta)
+
+def _merge_to_limit(runfiles_group_info, runfiles_group_metadata_info = None, *, max_groups, default_weight = 0, merged_group_name = None):
+    names = _group_names(runfiles_group_info)
+    if len(names) <= max_groups:
+        return struct(
+            runfiles_group_info = runfiles_group_info,
+            runfiles_group_metadata_info = runfiles_group_metadata_info,
+            group_count = len(names),
+        )
+
+    groups = {name: getattr(runfiles_group_info, name) for name in names}
+    meta = {}
+    for name in names:
+        meta[name] = _get_metadata(runfiles_group_metadata_info, name)
+
+    for _ in range(len(names)):
+        if len(groups) <= max_groups:
+            break
+        pair = _find_cheapest_pair(groups, meta, default_weight)
+        if pair == None:
+            break
+        groups, meta = _merge_pair(groups, meta, pair[0], pair[1], default_weight, merged_group_name)
+
+    merged_rgi = RunfilesGroupInfo(**groups)
+    merged_metadata = RunfilesGroupMetadataInfo(groups = meta) if meta else runfiles_group_metadata_info
+    return struct(
+        runfiles_group_info = merged_rgi,
+        runfiles_group_metadata_info = merged_metadata,
+        group_count = len(groups),
+    )
+
+def _merge_metadata(base, override):
+    if base == None and override == None:
+        return None
+    if base == None:
+        return override
+    if override == None:
+        return base
+
+    merged = dict(base.groups)
+    merged.update(override.groups)
+    return RunfilesGroupMetadataInfo(groups = merged)
 
 lib = struct(
+    group_metadata = group_metadata,
     group_names = _group_names,
     ordered_groups = _ordered_groups,
     transform_groups = _transform_groups,
+    merge_to_limit = _merge_to_limit,
+    merge_metadata = _merge_metadata,
 )
