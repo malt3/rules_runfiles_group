@@ -30,19 +30,15 @@ def _starlark_library_impl(ctx):
 
     group_name = loadpath + ":" + ctx.label.name
 
+    dep_groups = lib.collect_groups(ctx.attr.deps)
+    data_groups = lib.collect_groups(ctx.attr.data)
+
     groups = {}
-    for dep in ctx.attr.deps:
-        if RunfilesGroupInfo in dep:
-            for name in lib.group_names(dep[RunfilesGroupInfo]):
-                groups[name] = getattr(dep[RunfilesGroupInfo], name)
+    groups.update(dep_groups.groups)
+    groups.update(data_groups.groups)
+    groups[group_name] = depset(direct_srcs, transitive = data_groups.ungrouped)
 
-    groups[group_name] = depset(direct_srcs + ctx.files.data)
-
-    metadata = None
-    for dep in ctx.attr.deps:
-        if RunfilesGroupMetadataInfo in dep:
-            metadata = lib.merge_metadata(metadata, dep[RunfilesGroupMetadataInfo])
-
+    metadata = lib.merge_metadata(dep_groups.metadata, data_groups.metadata)
     own_weight = ctx.attr.runfiles_weight if ctx.attr.runfiles_weight > 0 else None
     own_metadata = RunfilesGroupMetadataInfo(groups = {
         group_name: lib.group_metadata(weight = own_weight),

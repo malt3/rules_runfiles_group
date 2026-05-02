@@ -93,6 +93,12 @@ starlark_binary(
     ],
 )
 
+starlark_binary(
+    name = "data_has_executable",
+    src = "empty.star",
+    data = ["//src/shell_app:greeter"],
+)
+
 fake_package(
     name = "adder_pkg",
     binary = ":adder",
@@ -121,6 +127,7 @@ runfiles_group_analysis_test(
         ":hasher",
         ":3p_deps_demo",
         ":merge_demo",
+        ":data_has_executable",
     ],
 )
 
