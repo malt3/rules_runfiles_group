@@ -254,7 +254,7 @@ starlark_binary = rule(
             cfg = "target",
         ),
         "_loadmap_generator": attr.label(
-            default = Label("//producer/interpreter/loadmap_generator"),
+            default = Label("//producer/interpreter/loadmap"),
             executable = True,
             cfg = "exec",
         ),

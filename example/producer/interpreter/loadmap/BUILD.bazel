@@ -1,14 +1,14 @@
 load("@rules_go//go:def.bzl", "go_binary", "go_library")
 
 go_library(
-    name = "loadmap_generator_lib",
+    name = "loadmap_lib",
     srcs = ["main.go"],
-    importpath = "example/producer/interpreter/loadmap_generator",
+    importpath = "example/producer/interpreter/loadmap",
     visibility = ["//visibility:private"],
 )
 
 go_binary(
-    name = "loadmap_generator",
-    embed = [":loadmap_generator_lib"],
+    name = "loadmap",
+    embed = [":loadmap_lib"],
     visibility = ["//visibility:public"],
 )
