@@ -1,0 +1,30 @@
+load("@rules_shell//shell:sh_binary.bzl", "sh_binary")
+load("@rules_shell//shell:sh_library.bzl", "sh_library")
+
+package(default_visibility = ["//visibility:public"])
+
+sh_library(
+    name = "format_lib",
+    srcs = ["format.sh"],
+    data = ["templates/banner.txt"],
+)
+
+sh_library(
+    name = "config_lib",
+    srcs = ["config.sh"],
+    data = ["data/defaults.conf"],
+)
+
+sh_binary(
+    name = "greeter",
+    srcs = ["greeter.sh"],
+    data = [
+        "data/names.txt",
+    ],
+    deps = [
+        "@rules_shell//shell/runfiles",
+        ":config_lib",
+        ":format_lib",
+    ],
+    visibility = ["//visibility:public"],
+)

@@ -138,6 +138,26 @@ There may be different preferences for splitting files into groups. A good way t
 > [!CAUTION]
 > Merging groups by merging their `depset`s is cheap. Calling `.to_list()` on a depset is expensive and should be avoided during analysis. Build group hierarchies purely through `depset(transitive = [...])`.
 
+### Handling `deps` and `data`
+
+Most rules have the attributes `deps` and `data`. You should implement support for them carfully.
+
+**`deps`** typically come from your own ruleset's `*_library` targets — they will likely provide `RunfilesGroupInfo`, so you should merge the groups and metadata with the others.
+
+**`data`** can be arbitrary targets. Some may provide `RunfilesGroupInfo` (e.g., a `*_binary` from a ruleset that supports it), while others won't. Add ungrouped files (when `RunfilesGroupInfo` is missing) to a runfiles group (the default for the current target) so they are not lost.
+
+```starlark
+dep_groups = lib.collect_groups(ctx.attr.deps)
+data_groups = lib.collect_groups(ctx.attr.data)
+
+groups = {}
+groups.update(dep_groups.groups)
+groups.update(data_groups.groups)
+groups["app_code"] = depset(my_own_files, transitive = data_groups.ungrouped)
+
+metadata = lib.merge_metadata(dep_groups.metadata, data_groups.metadata)
+```
+
 ### Group count limits
 
 Packaging rules may enforce a maximum group count via `lib.merge_to_limit()`. For example, container image runtimes may limit the total number of layers an image can have. The merge algorithm respects `rank` (only merges within the same rank), `do_not_merge` (never merges protected groups), and `weight` (merges lightest groups first).
@@ -250,6 +270,7 @@ Note that ordering may not matter for some kinds of packages. In that case, it's
 
 | Ruleset | Ordering | Merge-to-limit | `aspect_hints` support |
 |---------|----------|----------------|----------------------|
+| [rules_img](https://github.com/bazel-contrib/rules_img) | ✅ | ✅ | ✅ |
 | *Your ruleset here* | | | |
 
 > To add your ruleset to these tables, open a pull request.

@@ -26,9 +26,19 @@ lib.merge_to_limit(runfiles_group_info, metadata_info = None, max_groups, defaul
     merged_group_name(lighter_name, lighter_weight, heavier_name, heavier_weight)
     to determine the name of the merged group. If None, the heavier group's name is kept.
 
-lib.merge_metadata(base, override)
-    Dict-merges two RunfilesGroupMetadataInfo instances (or None).
+lib.merge_metadata(*metadatas)
+    Dict-merges any number of RunfilesGroupMetadataInfo instances (or None).
     Returns RunfilesGroupMetadataInfo or None. Per-key last-wins.
+
+lib.collect_groups(deps)
+    Extracts RunfilesGroupInfo and RunfilesGroupMetadataInfo from a list of
+    dependency targets. For deps providing RunfilesGroupInfo, extracts all
+    groups and metadata. For deps without it, collects
+    DefaultInfo.default_runfiles.files as ungrouped.
+    Returns struct(groups, metadata, ungrouped) where:
+      groups: dict[str, depset[File]]
+      metadata: RunfilesGroupMetadataInfo or None
+      ungrouped: list[depset[File]]
 """
 
 load("@bazel_features//:features.bzl", "bazel_features")
@@ -116,7 +126,7 @@ def _find_cheapest_pair(groups, meta, default_weight):
 
 def _merge_pair(groups, meta, lighter, heavier, default_weight, merged_group_name_fn):
     """Merges lighter into heavier, returns new (groups, meta) dicts."""
-    merged_depset = depset(transitive = [groups[lighter], groups[heavier]])
+    merged_depsets = groups[lighter] + groups[heavier]
     merged_weight = _effective_weight(meta[lighter], default_weight) + \
                     _effective_weight(meta[heavier], default_weight)
     merged_entry = struct(
@@ -133,7 +143,7 @@ def _merge_pair(groups, meta, lighter, heavier, default_weight, merged_group_nam
         out_name = heavier
 
     new_groups = {n: d for n, d in groups.items() if n != lighter and n != heavier}
-    new_groups[out_name] = merged_depset
+    new_groups[out_name] = merged_depsets
     new_meta = {n: e for n, e in meta.items() if n != lighter and n != heavier}
     new_meta[out_name] = merged_entry
     return (new_groups, new_meta)
@@ -147,7 +157,7 @@ def _merge_to_limit(runfiles_group_info, runfiles_group_metadata_info = None, *,
             group_count = len(names),
         )
 
-    groups = {name: getattr(runfiles_group_info, name) for name in names}
+    groups = {name: [getattr(runfiles_group_info, name)] for name in names}
     meta = {}
     for name in names:
         meta[name] = _get_metadata(runfiles_group_metadata_info, name)
@@ -160,7 +170,10 @@ def _merge_to_limit(runfiles_group_info, runfiles_group_metadata_info = None, *,
             break
         groups, meta = _merge_pair(groups, meta, pair[0], pair[1], default_weight, merged_group_name)
 
-    merged_rgi = RunfilesGroupInfo(**groups)
+    flat = {}
+    for name, ds in groups.items():
+        flat[name] = ds[0] if len(ds) == 1 else depset(transitive = ds)
+    merged_rgi = RunfilesGroupInfo(**flat)
     merged_metadata = RunfilesGroupMetadataInfo(groups = meta) if meta else runfiles_group_metadata_info
     return struct(
         runfiles_group_info = merged_rgi,
@@ -168,17 +181,32 @@ def _merge_to_limit(runfiles_group_info, runfiles_group_metadata_info = None, *,
         group_count = len(groups),
     )
 
-def _merge_metadata(base, override):
-    if base == None and override == None:
-        return None
-    if base == None:
-        return override
-    if override == None:
-        return base
+def _merge_metadata(*metadatas):
+    result = None
+    for m in metadatas:
+        if m == None:
+            continue
+        if result == None:
+            result = m
+        else:
+            merged = dict(result.groups)
+            merged.update(m.groups)
+            result = RunfilesGroupMetadataInfo(groups = merged)
+    return result
 
-    merged = dict(base.groups)
-    merged.update(override.groups)
-    return RunfilesGroupMetadataInfo(groups = merged)
+def _collect_groups(deps):
+    groups = {}
+    metadata = None
+    ungrouped = []
+    for dep in deps:
+        if RunfilesGroupInfo in dep:
+            for name in _group_names(dep[RunfilesGroupInfo]):
+                groups[name] = getattr(dep[RunfilesGroupInfo], name)
+            if RunfilesGroupMetadataInfo in dep:
+                metadata = _merge_metadata(metadata, dep[RunfilesGroupMetadataInfo])
+        else:
+            ungrouped.append(depset(transitive = [dep[DefaultInfo].files, dep[DefaultInfo].default_runfiles.files]))
+    return struct(groups = groups, metadata = metadata, ungrouped = ungrouped)
 
 lib = struct(
     group_metadata = group_metadata,
@@ -187,4 +215,5 @@ lib = struct(
     transform_groups = _transform_groups,
     merge_to_limit = _merge_to_limit,
     merge_metadata = _merge_metadata,
+    collect_groups = _collect_groups,
 )

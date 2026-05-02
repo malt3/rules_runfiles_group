@@ -1,0 +1,4 @@
+# List of names to greet
+Alice
+Bob
+Charlie

@@ -2,6 +2,7 @@ module(name = "rules_runfiles_group_example")
 
 bazel_dep(name = "rules_runfiles_group")
 bazel_dep(name = "rules_go", version = "0.60.0")
+bazel_dep(name = "rules_shell", version = "0.8.0")
 bazel_dep(name = "hermetic_launcher", version = "0.0.5")
 bazel_dep(name = "gazelle", version = "0.50.0")
 bazel_dep(name = "sha256.bzl", version = "0.0.1")

@@ -120,11 +120,9 @@ def _starlark_binary_impl(ctx):
     if ctx.attr.runfiles_grouping != "disabled":
         groups = {}
 
-        # Collect metadata from deps (carries weight from starlark_library).
-        dep_metadata = None
-        for dep in ctx.attr.deps:
-            if RunfilesGroupMetadataInfo in dep:
-                dep_metadata = lib.merge_metadata(dep_metadata, dep[RunfilesGroupMetadataInfo])
+        dep_groups = lib.collect_groups(ctx.attr.deps)
+        data_groups = lib.collect_groups(ctx.attr.data)
+        dep_metadata = lib.merge_metadata(dep_groups.metadata, data_groups.metadata)
 
         metadata = {}
         own_repo = ctx.attr.repository
@@ -140,36 +138,42 @@ def _starlark_binary_impl(ctx):
         groups["std"] = stdlib[DefaultInfo].default_runfiles.files
         metadata["std"] = lib.group_metadata(rank = -1)
 
-        entrypoint_files = depset([output, entrypoint, loadmap, properties] + ctx.files.data)
+        entrypoint_files = depset([output, entrypoint, loadmap, properties])
 
         # Dep groups
         if ctx.attr.runfiles_grouping == "by_target":
-            groups["entrypoint"] = entrypoint_files
+            groups.update(data_groups.groups)
+            groups["entrypoint"] = depset(transitive = [entrypoint_files] + data_groups.ungrouped)
             metadata["entrypoint"] = lib.group_metadata(rank = 2)
-            for dep in ctx.attr.deps:
-                if RunfilesGroupInfo in dep:
-                    for name in lib.group_names(dep[RunfilesGroupInfo]):
-                        groups[name] = getattr(dep[RunfilesGroupInfo], name)
-                        dep_weight = _get_dep_weight(dep_metadata, name)
-                        if _extract_repo(name) == own_repo:
-                            metadata[name] = lib.group_metadata(rank = 1, weight = dep_weight)
-                        elif dep_weight != None:
-                            metadata[name] = lib.group_metadata(weight = dep_weight)
+            for name in data_groups.groups:
+                dep_weight = _get_dep_weight(dep_metadata, name)
+                if _extract_repo(name) == own_repo:
+                    metadata[name] = lib.group_metadata(rank = 1, weight = dep_weight)
+                elif dep_weight != None:
+                    metadata[name] = lib.group_metadata(weight = dep_weight)
+            for name, files in dep_groups.groups.items():
+                groups[name] = files
+                dep_weight = _get_dep_weight(dep_metadata, name)
+                if _extract_repo(name) == own_repo:
+                    metadata[name] = lib.group_metadata(rank = 1, weight = dep_weight)
+                elif dep_weight != None:
+                    metadata[name] = lib.group_metadata(weight = dep_weight)
 
         elif ctx.attr.runfiles_grouping == "by_repo":
             repo_depsets = {}
             repo_weights = {}
-            repo_depsets[own_repo] = [entrypoint_files]
-            for dep in ctx.attr.deps:
-                if RunfilesGroupInfo in dep:
-                    for name in lib.group_names(dep[RunfilesGroupInfo]):
-                        repo = _extract_repo(name)
-                        if repo not in repo_depsets:
-                            repo_depsets[repo] = []
-                        repo_depsets[repo].append(getattr(dep[RunfilesGroupInfo], name))
-                        w = _get_dep_weight(dep_metadata, name)
-                        if w != None:
-                            repo_weights[repo] = repo_weights.get(repo, 0) + w
+            repo_depsets[own_repo] = [entrypoint_files] + data_groups.ungrouped
+            all_dep_groups = {}
+            all_dep_groups.update(data_groups.groups)
+            all_dep_groups.update(dep_groups.groups)
+            for name, files in all_dep_groups.items():
+                repo = _extract_repo(name)
+                if repo not in repo_depsets:
+                    repo_depsets[repo] = []
+                repo_depsets[repo].append(files)
+                w = _get_dep_weight(dep_metadata, name)
+                if w != None:
+                    repo_weights[repo] = repo_weights.get(repo, 0) + w
             for repo, ds in repo_depsets.items():
                 groups[repo or "_main"] = depset(transitive = ds)
                 if repo == own_repo:
