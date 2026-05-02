@@ -140,7 +140,7 @@ There may be different preferences for splitting files into groups. A good way t
 
 ### Handling `deps` and `data`
 
-Most rules have the attributes `deps` and `data`. You should implement support for them carfully.
+Most rules have the attributes `deps` and `data`. You should implement support for them carefully.
 
 **`deps`** typically come from your own ruleset's `*_library` targets — they will likely provide `RunfilesGroupInfo`, so you should merge the groups and metadata with the others.
 
