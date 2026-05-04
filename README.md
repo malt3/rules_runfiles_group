@@ -41,7 +41,7 @@ pkg_creator(
 |----------|:-:|:-:|:-:|---------|
 | `DefaultInfo` | **must** return | — | yes | Defines the executable and runfiles tree. Used as fallback when `RunfilesGroupInfo` is missing or the consumer doesn't support it. |
 | `RunfilesGroupInfo` | may return | — | no | Splits `DefaultInfo.default_runfiles.files` into named groups. |
-| `RunfilesGroupMetadataInfo` | may return | may add | no | Per-group metadata (rank, do_not_merge, weight) controlling ordering and merge behavior. |
+| `RunfilesGroupMetadataInfo` | may return | may add | no | Per-group metadata (rank, do_not_merge, weight, executable_group) controlling ordering, merge behavior, and executable placement. |
 | `RunfilesGroupTransformInfo` | — | may add | no | Transforms groups and metadata (e.g., exclude a group, remap names). |
 
 > **Full worked example:** The [`example/`](example/) directory contains a complete end-to-end demo. Look at [`example/producer/`](example/producer/) for `*_binary` rule implementation, [`example/consumer/`](example/consumer/) for packaging rule implementation, and [`example/src/`](example/src/) for user-facing `BUILD` files.
@@ -95,6 +95,7 @@ Each group can have:
 | `rank` | int | 0 | Partial ordering key. Lower rank = earlier in the output. Groups at different ranks are never merged together. |
 | `do_not_merge` | bool | False | If True, packaging rules must not merge this group with others. |
 | `weight` | int >= 0 or None | None | Hint for merge priority. Lighter groups are merged first when reducing group count. If None, the packager may apply its own default. |
+| `executable_group` | bool | False | If True, signals that the packager should place the executable file, runfiles symlinks, repo mapping manifest, and other supporting files for the main entrypoint into this group. Only meaningful at the top level — `collect_groups` strips this bit by default (see below). |
 
 Groups not listed in the metadata dict get default values for all fields (the same applies if `RunfilesGroupMetadataInfo` is missing).
 
@@ -109,7 +110,7 @@ providers.append(RunfilesGroupInfo(**groups))
 providers.append(RunfilesGroupMetadataInfo(groups = {
     "interpreter": lib.group_metadata(rank = -2, do_not_merge = True),
     "std": lib.group_metadata(rank = -1),
-    "app_code": lib.group_metadata(rank = 0, weight = 100),
+    "app_code": lib.group_metadata(rank = 0, weight = 100, executable_group = True),
 }))
 ```
 
@@ -146,6 +147,8 @@ Most rules have the attributes `deps` and `data`. You should implement support f
 
 **`data`** can be arbitrary targets. Some may provide `RunfilesGroupInfo` (e.g., a `*_binary` from a ruleset that supports it), while others won't. Add ungrouped files (when `RunfilesGroupInfo` is missing) to a runfiles group (the default for the current target) so they are not lost.
 
+By default, `collect_groups` strips the `executable_group` bit from all collected metadata entries. This is the correct behavior for `data` deps: when a binary appears as a data dependency of another binary, its `executable_group` annotation is meaningless because the outer binary has its own entrypoint. The top-level `*_binary` target should set `executable_group` on its own group instead.
+
 ```starlark
 dep_groups = lib.collect_groups(ctx.attr.deps)
 data_groups = lib.collect_groups(ctx.attr.data)
@@ -156,6 +159,11 @@ groups.update(data_groups.groups)
 groups["app_code"] = depset(my_own_files, transitive = data_groups.ungrouped)
 
 metadata = lib.merge_metadata(dep_groups.metadata, data_groups.metadata)
+# executable_group has been stripped from dep metadata by collect_groups.
+# Set it on our own group instead:
+metadata = lib.merge_metadata(metadata, RunfilesGroupMetadataInfo(groups = {
+    "app_code": lib.group_metadata(executable_group = True),
+}))
 ```
 
 ### Group count limits
@@ -210,7 +218,7 @@ When resolving runfiles groups from a binary target, follow this well-defined or
 
 4. **Optionally merge:** If you need to enforce a maximum group count, call `lib.merge_to_limit(runfiles_group_info, metadata_info, max_groups = N)` before ordering. This merges the lightest same-rank groups until the count fits within the limit. Note: packagers may wish to implement their own group merging strategies instead of `lib.merge_to_limit`.
 
-5. **Apply ordering:** Call `lib.ordered_groups(runfiles_group_info, metadata_info)` to get the final ordered list of `(group_name, depset[File])` tuples, sorted by rank.
+5. **Apply ordering:** Call `lib.ordered_groups(runfiles_group_info, metadata_info)` to get the final ordered list of `struct(name, files, metadata)` entries, sorted by rank. Each entry has `name` (string), `files` (depset[File]), and `metadata` (the group's metadata struct, or None if no explicit metadata was set for that group). When a group has `metadata.executable_group == True`, the packager should add the executable file, runfiles symlinks, repo mapping manifest, and other supporting files for the main entrypoint to that group's files.
 
 ### Using the library
 
@@ -237,7 +245,14 @@ for hint in ctx.rule.attr.aspect_hints:
 
 # Order by rank
 ordered = lib.ordered_groups(rgi, metadata)
-for group_name, files_depset in ordered:
+for entry in ordered:
+    # entry.name: group name (string)
+    # entry.files: depset[File]
+    # entry.metadata: group_metadata struct or None
+    if entry.metadata and entry.metadata.executable_group:
+        # Add executable, runfiles symlinks, repo mapping manifest
+        # to this group's layer.
+        ...
     # Create a layer / archive entry / etc.
     ...
 
@@ -254,7 +269,11 @@ Note that ordering may not matter for some kinds of packages. In that case, it's
 
 ### Packaging the executable file itself along with other supporting files
 
-`RunfilesGroupInfo` only covers the files inside `DefaultInfo.default_runfiles.files`. A well-behaved packager should also handle the remaining pieces of the executable: the binary file itself, the runfiles symlinks, the repo mapping manifest, etc. These are not part of any runfiles group. It is up to the packager to decide where they go — they could be added to an existing group, placed in a dedicated group, or handled out of band entirely.
+`RunfilesGroupInfo` only covers the files inside `DefaultInfo.default_runfiles.files`. A well-behaved packager should also handle the remaining pieces of the executable: the binary file itself, the runfiles symlinks, the repo mapping manifest, etc. These are not part of any runfiles group.
+
+When a group's metadata has `executable_group = True`, the packager should add these supporting files to that group. This is the `*_binary` rule's way of saying "this is where my entrypoint lives." If no group is marked `executable_group`, the packager decides where to place them — they could be added to an existing group, placed in a dedicated group, or handled out of band entirely.
+
+The `executable_group` bit is only meaningful at the top level. When a binary appears as a `data` dependency of another binary, the outer binary has its own entrypoint. For this reason, `lib.collect_groups()` strips `executable_group` from collected metadata by default. The `*_binary` rule should set `executable_group` on its own group rather than inheriting it from deps.
 
 ---
 
