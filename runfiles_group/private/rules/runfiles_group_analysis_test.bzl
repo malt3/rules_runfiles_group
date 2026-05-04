@@ -120,7 +120,7 @@ def _test_one(ctx, binary_attr):
             )
 
     ordered = lib.ordered_groups(rgi, metadata)
-    actual_names = [name for name, _ in ordered]
+    actual_names = [entry.name for entry in ordered]
 
     if ctx.attr.expected_group_names:
         if actual_names != ctx.attr.expected_group_names:
@@ -131,6 +131,14 @@ def _test_one(ctx, binary_attr):
                 "actual ordered group names:\n" +
                 _INDENT + str(actual_names),
             )
+
+    executable_groups = [entry.name for entry in ordered if entry.metadata and entry.metadata.executable_group]
+    if len(executable_groups) > 1:
+        success = False
+        issues.append(
+            "at most one group may set executable_group = True, but found {}:\n".format(len(executable_groups)) +
+            "\n".join([_INDENT + name for name in executable_groups]),
+        )
 
     return (success, issues)
 

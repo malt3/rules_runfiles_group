@@ -144,7 +144,7 @@ def _starlark_binary_impl(ctx):
         if ctx.attr.runfiles_grouping == "by_target":
             groups.update(data_groups.groups)
             groups["entrypoint"] = depset(transitive = [entrypoint_files] + data_groups.ungrouped)
-            metadata["entrypoint"] = lib.group_metadata(rank = 2)
+            metadata["entrypoint"] = lib.group_metadata(rank = 2, executable_group = True)
             for name in data_groups.groups:
                 dep_weight = _get_dep_weight(dep_metadata, name)
                 if _extract_repo(name) == own_repo:
@@ -177,7 +177,7 @@ def _starlark_binary_impl(ctx):
             for repo, ds in repo_depsets.items():
                 groups[repo or "_main"] = depset(transitive = ds)
                 if repo == own_repo:
-                    metadata[repo or "_main"] = lib.group_metadata(rank = 1, weight = repo_weights.get(repo, None))
+                    metadata[repo or "_main"] = lib.group_metadata(rank = 1, weight = repo_weights.get(repo, None), executable_group = True)
                 elif repo in repo_weights:
                     metadata[repo or "_main"] = lib.group_metadata(weight = repo_weights[repo])
 
