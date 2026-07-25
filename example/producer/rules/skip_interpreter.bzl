@@ -1,32 +1,30 @@
+"""An aspect_hints mixin that drops the interpreter group.
+
+Users add it to a binary's aspect_hints when the interpreter is already present in
+the base image, so the packager should not ship it again.
+"""
+
 load("@rules_runfiles_group//runfiles_group:lib.bzl", "lib")
-load(
-    "@rules_runfiles_group//runfiles_group:providers.bzl",
-    "RunfilesGroupInfo",
-    "RunfilesGroupMetadataInfo",
-    "RunfilesGroupTransformInfo",
-)
+load("@rules_runfiles_group//runfiles_group:providers.bzl", "RunfilesGroupTransformInfo")
 
-_GROUP_PREFIX = "starlark_runfiles_group#"
+_INTERPRETER = "starlark_runfiles_group#interpreter"
 
-def _skip_interpreter_transform(runfiles_group_info, runfiles_group_metadata_info):
-    new_groups = {}
-    for group_name in lib.group_names(runfiles_group_info):
-        if group_name == _GROUP_PREFIX + "interpreter":
-            continue
-        new_groups[group_name] = getattr(runfiles_group_info, group_name)
+# A module-level def, never a lambda or a nested def: a function created during
+# analysis captures a cell per free variable and pins everything it closes over --
+# ctx, dep lists, dicts -- for as long as the provider lives.
+def _skip_interpreter_transform(resolved):
+    if _INTERPRETER not in resolved.by_name:
+        # Nothing to do: hand back the input rather than rebuilding it.
+        return resolved
 
-    new_metadata = None
-    if runfiles_group_metadata_info != None:
-        new_meta_groups = {k: v for k, v in runfiles_group_metadata_info.groups.items() if k != _GROUP_PREFIX + "interpreter"}
-        if new_meta_groups:
-            new_metadata = RunfilesGroupMetadataInfo(groups = new_meta_groups)
-
-    return struct(
-        runfiles_group_info = RunfilesGroupInfo(**new_groups),
-        runfiles_group_metadata_info = new_metadata,
+    # Fails loudly if the interpreter group happened to carry the executable,
+    # instead of silently dropping the entrypoint's supporting files.
+    return lib.resolved(
+        [entry for entry in resolved.groups if entry.name != _INTERPRETER],
+        executable_group = resolved.executable_group,
     )
 
-def _skip_interpreter_impl(ctx):
+def _skip_interpreter_impl(_ctx):
     return [
         RunfilesGroupTransformInfo(
             transform = _skip_interpreter_transform,

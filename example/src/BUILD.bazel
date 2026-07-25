@@ -179,6 +179,7 @@ runfiles_group_analysis_test(
     name = "test_adder_groups",
     binaries = [":adder"],
     check_disabled = False,
+    expected_executable_group = P + "entrypoint",
     expected_group_names = [
         P + "interpreter",
         P + "std",
@@ -197,6 +198,7 @@ runfiles_group_analysis_test(
     name = "test_hasher_groups",
     binaries = [":hasher"],
     check_disabled = False,
+    expected_executable_group = P + "_main",
     expected_group_names = [
         P + "interpreter",
         P + "std",
@@ -210,6 +212,7 @@ runfiles_group_analysis_test(
     name = "test_3p_deps_demo_groups",
     binaries = [":3p_deps_demo"],
     check_disabled = False,
+    expected_executable_group = P + "_main",
     expected_group_names = [
         P + "interpreter",
         P + "std",
@@ -232,6 +235,7 @@ runfiles_group_analysis_test(
     name = "test_adder_groups_merged",
     binaries = [":adder"],
     check_disabled = False,
+    expected_executable_group = P + "entrypoint",
     expected_group_names = [
         P + "interpreter",
         P + "std",
@@ -251,6 +255,7 @@ runfiles_group_analysis_test(
     name = "test_adder_groups_cross_affinity",
     binaries = [":adder"],
     check_disabled = False,
+    expected_executable_group = P + "entrypoint",
     expected_group_names = [
         P + "interpreter",
         P + "std",
@@ -314,6 +319,7 @@ runfiles_group_analysis_test(
     name = "test_merge_demo_groups",
     binaries = [":merge_demo"],
     check_disabled = False,
+    expected_executable_group = P + "_main",
     expected_group_names = [
         P + "interpreter",
         P + "std",
@@ -385,6 +391,7 @@ runfiles_group_analysis_test(
     name = "test_merge_demo_max3",
     binaries = [":merge_demo"],
     check_disabled = False,
+    expected_executable_group = P + "_main",
     expected_group_count = 4,
     expected_group_names = [
         P + "interpreter",

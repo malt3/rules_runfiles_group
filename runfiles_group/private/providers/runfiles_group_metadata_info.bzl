@@ -1,132 +1,115 @@
-"""Defines provider for metadata about RunfilesGroupInfo groups.
+"""Defines provider for per-group metadata overrides.
 
-RunfilesGroupMetadataInfo holds per-group metadata that controls ordering
-(rank), merge eligibility (do_not_merge), merge priority (weight), and merge
-grouping preference (merge_affinity).
+Producers put a group's metadata directly on its entry (`lib.entry()`). This
+provider carries *overrides*, keyed by group name, for a party that does not own
+the group -- in practice an `aspect_hints` mixin that wants to re-rank, protect or
+re-affiliate a group produced by someone else.
+
+Because a hint target's provider instance is shared by reference across every
+target that lists it, the cost is O(number of hints), never O(targets x groups).
 """
+
+load(":runfiles_group_entry_info.bzl", "KINDS")
 
 _DOC = """\
-Metadata about groups in a RunfilesGroupInfo instance.
+Per-group metadata overrides, keyed by group name.
 
-Each entry maps a group name to a struct with:
-- rank (int): Partial ordering key. Lower rank = earlier. Default 0.
-- do_not_merge (bool): If True, packager must not merge this group. Default False.
-- weight (int or None): Hint for merge priority. Lighter groups merge first.
-  If None, the packager may apply an undefined default. Default None.
-- executable_group (bool): If True, signals that the packager should place
-  the executable file, runfiles symlinks, repo mapping manifest, and other
-  supporting files for the main entrypoint into this group. Default False.
-- merge_affinity (str): Best-effort merge grouping hint. When groups must be
-  merged to fit a limit, groups that share the same merge_affinity are
-  preferred merge partners over groups with a different merge_affinity. It is
-  only a preference: merging still falls back across affinities when necessary.
-  The empty string "" means "no affinity" — such groups share a common default
-  bucket. Default "".
+Each value is a *patch*: only the fields it actually carries are applied, and every
+other field of the group's entry is left untouched. Build one with
+`lib.group_metadata(...)`, passing just the fields you want to change:
 
-Groups not present in the dict are treated as having default metadata
-(rank=0, do_not_merge=False, weight=None, executable_group=False,
-merge_affinity="").
+    RunfilesGroupMetadataInfo(groups = {
+        "some_ruleset#interpreter": lib.group_metadata(rank = -2000),
+    })
+
+Overridable fields:
+
+- rank (int): partial ordering key. Lower rank = earlier.
+- do_not_merge (bool): if True, packagers must not merge this group.
+- weight (int >= 0 or None): merge priority hint. Lighter groups merge first.
+- kind (str): one of lib.KINDS. A stable selector for packagers.
+- merge_affinity (str): merge grouping hint. "" means no affinity.
+- executable_group (bool): if True, this group receives the executable and its
+  supporting files. Setting it on one group moves it there; setting it to False on
+  the group that currently holds it clears it.
+
+Names that match no group are ignored, so a hint can be attached to targets that
+do not all produce the same groups.
 """
 
-_DEFAULT_RANK = 0
-_DEFAULT_DO_NOT_MERGE = False
-_DEFAULT_WEIGHT = None
-_DEFAULT_EXECUTABLE_GROUP = False
-_DEFAULT_MERGE_AFFINITY = ""
+# Fields a patch may carry. `executable_group` is not a property of an entry -- it
+# lives on RunfilesGroupInfo as a single group name -- but it is patchable here so
+# that a hint can move the entrypoint.
+ENTRY_PATCH_FIELDS = ["rank", "do_not_merge", "weight", "kind", "merge_affinity"]
+PATCH_FIELDS = ENTRY_PATCH_FIELDS + ["executable_group"]
 
-def _validate(where, rank, do_not_merge, weight, executable_group, merge_affinity):
-    if type(rank) != "int":
-        fail(where, ": rank must be an int, got ", type(rank))
-    if type(do_not_merge) != "bool":
-        fail(where, ": do_not_merge must be a bool, got ", type(do_not_merge))
-    if weight != None:
-        if type(weight) != "int":
-            fail(where, ": weight must be an int or None, got ", type(weight))
-        if weight < 0:
-            fail(where, ": weight must be >= 0, got ", weight)
-    if type(executable_group) != "bool":
-        fail(where, ": executable_group must be a bool, got ", type(executable_group))
-    if type(merge_affinity) != "string":
-        fail(where, ": merge_affinity must be a string, got ", type(merge_affinity))
-
-def group_metadata(*, rank = _DEFAULT_RANK, do_not_merge = _DEFAULT_DO_NOT_MERGE, weight = _DEFAULT_WEIGHT, executable_group = _DEFAULT_EXECUTABLE_GROUP, merge_affinity = _DEFAULT_MERGE_AFFINITY):
-    """Creates a validated group metadata struct.
-
-    Args:
-        rank: Partial ordering key. Lower rank = earlier. Default 0.
-        do_not_merge: If True, packager must not merge this group. Default False.
-        weight: Merge priority hint (int >= 0 or None). Default None.
-        executable_group: If True, the packager should place the executable
-            and supporting files into this group. Default False.
-        merge_affinity: Best-effort merge grouping hint (str). Groups that share
-            the same merge_affinity are preferred merge partners. The empty
-            string "" means "no affinity". Default "".
-
-    Returns:
-        A struct with rank, do_not_merge, weight, executable_group, and
-        merge_affinity fields.
-    """
-    _validate("group_metadata", rank, do_not_merge, weight, executable_group, merge_affinity)
-
-    # Collapse the all-defaults case onto the module-level singleton. Module
-    # globals are frozen after the .bzl is loaded, so every caller shares one
-    # 80-byte object instead of allocating its own. Structs compare by value and
-    # Starlark has no identity operator, so this is unobservable.
-    if (rank == _DEFAULT_RANK and do_not_merge == _DEFAULT_DO_NOT_MERGE and
-        weight == _DEFAULT_WEIGHT and executable_group == _DEFAULT_EXECUTABLE_GROUP and
-        merge_affinity == _DEFAULT_MERGE_AFFINITY):
-        return _DEFAULT_METADATA
-
-    return struct(rank = rank, do_not_merge = do_not_merge, weight = weight, executable_group = executable_group, merge_affinity = merge_affinity)
-
-_DEFAULT_METADATA = struct(
-    rank = _DEFAULT_RANK,
-    do_not_merge = _DEFAULT_DO_NOT_MERGE,
-    weight = _DEFAULT_WEIGHT,
-    executable_group = _DEFAULT_EXECUTABLE_GROUP,
-    merge_affinity = _DEFAULT_MERGE_AFFINITY,
+# The metadata a group has when nothing overrides it. Exported as the reference
+# default for consumers; entries themselves always carry explicit values.
+DEFAULT_METADATA = struct(
+    rank = 0,
+    do_not_merge = False,
+    weight = None,
+    kind = "",
+    merge_affinity = "",
 )
 
+def _validate_field(where, name, value):
+    if name == "rank":
+        if type(value) != "int":
+            fail("{}: rank must be an int, got {}".format(where, type(value)))
+    elif name == "do_not_merge" or name == "executable_group":
+        if type(value) != "bool":
+            fail("{}: {} must be a bool, got {}".format(where, name, type(value)))
+    elif name == "weight":
+        if value != None:
+            if type(value) != "int":
+                fail("{}: weight must be an int or None, got {}".format(where, type(value)))
+            if value < 0:
+                fail("{}: weight must be >= 0, got {}".format(where, value))
+    elif name == "kind":
+        if value not in KINDS:
+            fail("{}: kind must be one of {}, got {}".format(where, KINDS, repr(value)))
+    elif name == "merge_affinity":
+        if type(value) != "string":
+            fail("{}: merge_affinity must be a string, got {}".format(where, type(value)))
+
+def group_metadata(**kwargs):
+    """Creates a validated metadata patch carrying only the fields passed.
+
+    Args:
+        **kwargs: any subset of rank, do_not_merge, weight, kind, merge_affinity
+            and executable_group.
+
+    Returns:
+        A struct with exactly the fields that were passed.
+    """
+    for name in kwargs:
+        if name not in PATCH_FIELDS:
+            fail("group_metadata: unknown field '{}', expected one of {}".format(name, PATCH_FIELDS))
+        _validate_field("group_metadata", name, kwargs[name])
+    return struct(**kwargs)
+
 def _normalize_entry(name, entry):
+    where = "RunfilesGroupMetadataInfo patch for group '{}'".format(name)
     if type(entry) == "struct":
-        if (hasattr(entry, "rank") and hasattr(entry, "do_not_merge") and
-            hasattr(entry, "weight") and hasattr(entry, "executable_group") and
-            hasattr(entry, "merge_affinity")):
-            # Identity fast path: an entry that already carries all five fields
-            # is validated in place and handed back as the SAME object.
-            #
-            # Rebuilding it would allocate a fresh 80-byte struct for every group
-            # at every level of the dependency graph, and Bazel cannot undo that:
-            # schemaless structs are never interned, and structs nested inside a
-            # dict are never visited by unsafeOptimizeMemoryLayout. Propagating
-            # the identical object upwards is the only sharing mechanism Starlark
-            # offers, and it is what keeps a dep's metadata from being duplicated
-            # into every one of its reverse dependencies.
-            _validate(
-                "RunfilesGroupMetadataInfo entry for group '{}'".format(name),
-                entry.rank,
-                entry.do_not_merge,
-                entry.weight,
-                entry.executable_group,
-                entry.merge_affinity,
-            )
-            return entry
-        return group_metadata(
-            rank = getattr(entry, "rank", _DEFAULT_RANK),
-            do_not_merge = getattr(entry, "do_not_merge", _DEFAULT_DO_NOT_MERGE),
-            weight = getattr(entry, "weight", _DEFAULT_WEIGHT),
-            executable_group = getattr(entry, "executable_group", _DEFAULT_EXECUTABLE_GROUP),
-            merge_affinity = getattr(entry, "merge_affinity", _DEFAULT_MERGE_AFFINITY),
-        )
+        # Identity fast path: a patch is validated in place and handed back as the
+        # SAME object, so a hint's struct is shared by reference by every target
+        # that reads it instead of being rebuilt per target. Rebuilding cannot be
+        # recovered from: schemaless structs are never interned, and structs
+        # nested in a dict are never reached by Bazel's provider compaction.
+        for field in PATCH_FIELDS:
+            if hasattr(entry, field):
+                _validate_field(where, field, getattr(entry, field))
+        return entry
     if type(entry) == "dict":
-        return group_metadata(
-            rank = entry.get("rank", _DEFAULT_RANK),
-            do_not_merge = entry.get("do_not_merge", _DEFAULT_DO_NOT_MERGE),
-            weight = entry.get("weight", _DEFAULT_WEIGHT),
-            executable_group = entry.get("executable_group", _DEFAULT_EXECUTABLE_GROUP),
-            merge_affinity = entry.get("merge_affinity", _DEFAULT_MERGE_AFFINITY),
-        )
-    fail("RunfilesGroupMetadataInfo: entry for group '{}' must be a struct or dict, got {}".format(name, type(entry)))
+        patch = {}
+        for field in entry:
+            if field not in PATCH_FIELDS:
+                fail("{}: unknown field '{}', expected one of {}".format(where, field, PATCH_FIELDS))
+            _validate_field(where, field, entry[field])
+            patch[field] = entry[field]
+        return struct(**patch)
+    fail("{} must be a struct or dict, got {}".format(where, type(entry)))
 
 def _make_runfilesgroupmetadatainfo_init(*, groups):
     if type(groups) != "dict":
@@ -141,10 +124,9 @@ RunfilesGroupMetadataInfo, _ = provider(
     init = _make_runfilesgroupmetadatainfo_init,
     fields = {
         "groups": """\
-A dict mapping group name (string) to a struct with rank, do_not_merge, weight, executable_group, and merge_affinity fields.
-Groups not present get default metadata (rank=0, do_not_merge=False, weight=None, executable_group=False, merge_affinity="").
+A dict mapping group name (string) to a metadata patch struct carrying any subset of
+rank, do_not_merge, weight, kind, merge_affinity and executable_group.
+Fields a patch does not carry are left unchanged. Names matching no group are ignored.
 """,
     },
 )
-
-DEFAULT_METADATA = _DEFAULT_METADATA

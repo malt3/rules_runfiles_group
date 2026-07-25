@@ -1,50 +1,20 @@
 """Consumer rule that resolves runfiles groups from a binary via an aspect."""
 
 load("@rules_runfiles_group//runfiles_group:lib.bzl", "lib")
-load(
-    "@rules_runfiles_group//runfiles_group:providers.bzl",
-    "RunfilesGroupInfo",
-    "RunfilesGroupMetadataInfo",
-    "RunfilesGroupTransformInfo",
+
+# The aspect exists for exactly one reason: aspect_hints is only reachable from an
+# aspect (ctx.rule.attr.aspect_hints), not from a rule. So the aspect forwards the
+# hint targets -- O(number of hints) references, which Skyframe retains anyway --
+# and the rule does all the O(groups) work transiently. Storing lib.resolve()'s
+# output here instead would retain a list plus one entry per group on every
+# packaging target for the life of the build.
+_FakePackageHintsInfo = provider(
+    doc = "The binary's aspect_hints, forwarded so the packaging rule can resolve groups.",
+    fields = {"aspect_hints": "list of Target: the binary's aspect_hints."},
 )
 
-# The aspect hands the *providers* to the rule, not lib.ordered_groups()'s
-# output. Ordering is O(G log G) and transient; retaining the ordered list would
-# keep a list plus one struct per group alive on every packaging target for the
-# life of the build.
-_FakePackageGroupsInfo = provider(
-    doc = "Runfiles groups of a binary after hint metadata and hint transforms.",
-    fields = {
-        "runfiles_group_info": "RunfilesGroupInfo, after all transforms.",
-        "runfiles_group_metadata_info": "RunfilesGroupMetadataInfo or None.",
-    },
-)
-
-def _fake_package_aspect_impl(target, ctx):
-    # 1. Obtain RunfilesGroupInfo from the target.
-    if RunfilesGroupInfo not in target:
-        return []
-    rgi = target[RunfilesGroupInfo]
-
-    # 2. Accumulate metadata via dict merge (binary + all hints, last-wins per key).
-    metadata = None
-    if RunfilesGroupMetadataInfo in target:
-        metadata = target[RunfilesGroupMetadataInfo]
-    for hint in ctx.rule.attr.aspect_hints:
-        if RunfilesGroupMetadataInfo in hint:
-            metadata = lib.merge_metadata(metadata, hint[RunfilesGroupMetadataInfo])
-
-    # 3. Apply all transforms (new signature: (rgi, metadata) -> struct).
-    for hint in ctx.rule.attr.aspect_hints:
-        if RunfilesGroupTransformInfo in hint:
-            result = lib.transform_groups(rgi, metadata, hint[RunfilesGroupTransformInfo])
-            rgi = result.runfiles_group_info
-            metadata = result.runfiles_group_metadata_info
-
-    return [_FakePackageGroupsInfo(
-        runfiles_group_info = rgi,
-        runfiles_group_metadata_info = metadata,
-    )]
+def _fake_package_aspect_impl(_target, ctx):
+    return [_FakePackageHintsInfo(aspect_hints = ctx.rule.attr.aspect_hints)]
 
 _fake_package_aspect = aspect(
     implementation = _fake_package_aspect_impl,
@@ -54,13 +24,21 @@ def _short_path(file):
     return file.short_path
 
 def _fake_package_impl(ctx):
-    groups_info = ctx.attr.binary[_FakePackageGroupsInfo]
+    binary = ctx.attr.binary
+    hints = binary[_FakePackageHintsInfo].aspect_hints
 
-    # 4. Apply ordering by rank.
-    ordered = lib.ordered_groups(
-        groups_info.runfiles_group_info,
-        groups_info.runfiles_group_metadata_info,
-    )
+    # One call does the whole resolution protocol: flatten the entry depset once,
+    # fold duplicate group names, apply the metadata overrides from the target and
+    # from the hints, run the hint transforms, order by (rank, name).
+    resolved = lib.resolve(binary, aspect_hints = hints)
+
+    if resolved == None:
+        # Mandatory fallback: a binary that does not group its runfiles is
+        # packaged as a single group.
+        resolved = lib.resolved([lib.entry(
+            name = "fake_package#default",
+            runfiles = binary[DefaultInfo].default_runfiles,
+        )])
 
     # Write the manifest from an Args object rather than a string built during
     # analysis: json.encode(...) over every path materialized an O(all files)
@@ -72,10 +50,10 @@ def _fake_package_impl(ctx):
     # '%' is legal in a label, which would corrupt a format template.
     args = ctx.actions.args()
     args.set_param_file_format("multiline")
-    for entry in ordered:
+    for entry in resolved.groups:
         args.add_all(
             entry.runfiles.files,
-            before_each = entry.name,
+            before_each = "{}\t{}".format(entry.kind, entry.name),
             map_each = _short_path,
             expand_directories = False,
         )
@@ -83,9 +61,10 @@ def _fake_package_impl(ctx):
     manifest = ctx.actions.declare_file(ctx.label.name + ".manifest")
     ctx.actions.write(manifest, args)
 
-    # Build OutputGroupInfo.
+    # The group carrying the executable is where a real packager would also put
+    # the launcher, the runfiles symlinks and the repo mapping manifest.
     output_groups = {}
-    for entry in ordered:
+    for entry in resolved.groups:
         output_groups[entry.name] = entry.runfiles.files
 
     return [
@@ -99,7 +78,7 @@ fake_package = rule(
         "binary": attr.label(
             mandatory = True,
             aspects = [_fake_package_aspect],
-            doc = "A binary target providing RunfilesGroupInfo.",
+            doc = "A binary target. RunfilesGroupInfo is used when present.",
         ),
     },
 )
