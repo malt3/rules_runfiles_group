@@ -1,4 +1,24 @@
 load("@bazel_skylib//:bzl_library.bzl", "bzl_library")
+load("@bazel_skylib//rules:common_settings.bzl", "bool_flag")
+
+# Global on/off switch for RunfilesGroupInfo emission, shared by every producing
+# ruleset. Emitting the providers costs a little extra memory on every target,
+# which is wasted when no packaging rule in the build consumes them; this flag
+# lets a build turn emission on only where it is needed.
+#
+# Producing rules read it via lib.is_enabled(ctx) (after merging lib.RULE_ATTRS
+# into their attrs). Consumer label: @rules_runfiles_group//runfiles_group:enabled.
+#
+# Defaults to False (no providers) so consumers opt in explicitly and only pay
+# for the providers when a packaging rule actually consumes them. Enable it for a
+# whole build with --@rules_runfiles_group//runfiles_group:enabled=true. This
+# repo re-enables it in its own .bazelrc so the runfiles_group analysis tests,
+# which require the providers, keep exercising the real grouping logic.
+bool_flag(
+    name = "enabled",
+    build_setting_default = False,
+    visibility = ["//visibility:public"],
+)
 
 exports_files(
     srcs = [

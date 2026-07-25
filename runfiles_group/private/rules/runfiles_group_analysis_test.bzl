@@ -1,5 +1,10 @@
 """A test verifying that RunfilesGroupInfo returned by a *_binary target is valid.
 
+Each binary is analyzed in two configurations via a split transition: one with the
+global switch @rules_runfiles_group//runfiles_group:enabled set to True, where the
+groups are checked for completeness, overlap and ordering, and one with it set to
+False, where the binary must emit no RunfilesGroupInfo at all.
+
 Usage:
 
 ```starlark
@@ -22,6 +27,32 @@ load("//runfiles_group/private/providers:runfiles_group_info.bzl", "RunfilesGrou
 load("//runfiles_group/private/providers:runfiles_group_metadata_info.bzl", "RunfilesGroupMetadataInfo")
 
 _INDENT = "    "
+
+# The global RunfilesGroupInfo on/off switch, in canonical form so it is
+# unambiguous inside a transition regardless of the consumer's repo mapping.
+_ENABLED_SETTING = str(Label("//runfiles_group:enabled"))
+
+# Split transition keys: each binary under test is analyzed twice, once with
+# RunfilesGroupInfo emission enabled and once with it disabled.
+_ENABLED_KEY = "runfiles_group_enabled"
+_DISABLED_KEY = "runfiles_group_disabled"
+
+def _rgi_split_transition_impl(_settings, _attr):
+    return {
+        _ENABLED_KEY: {_ENABLED_SETTING: True},
+        _DISABLED_KEY: {_ENABLED_SETTING: False},
+    }
+
+# Analyze every binary under test in both configurations, so a single test
+# target checks both that the groups are well formed when the providers are
+# requested and that the rule honors the global switch when they are not.
+# Pinning both branches explicitly also makes the test independent of whatever
+# value the flag happens to have on the command line.
+_rgi_split_transition = transition(
+    implementation = _rgi_split_transition_impl,
+    inputs = [],
+    outputs = [_ENABLED_SETTING],
+)
 
 def _indent(text):
     return "\n".join([_INDENT + line for line in text.split("\n")])
@@ -54,6 +85,7 @@ def _make_join_group_names(prefix):
         if stripped.startswith(prefix):
             stripped = stripped[len(prefix):]
         return lighter_name + "+" + stripped
+
     return _join
 
 def _test_one(ctx, binary_attr):
@@ -61,6 +93,10 @@ def _test_one(ctx, binary_attr):
     success = True
     default_info = binary_attr[DefaultInfo]
     default_runfiles = default_info.default_runfiles
+    if RunfilesGroupInfo not in binary_attr:
+        return (False, [
+            "doesn't provide RunfilesGroupInfo even though {} is True.".format(_ENABLED_SETTING),
+        ])
     runfiles_group_info = binary_attr[RunfilesGroupInfo]
     if default_runfiles == None:
         return (False, ["doesn't have default_runfiles to compare to."])
@@ -172,26 +208,52 @@ def _test_one(ctx, binary_attr):
 
     return (success, issues)
 
+def _test_one_disabled(binary_attr):
+    """Checks that a binary emits no runfiles group providers when the switch is off."""
+    leaked = []
+    if RunfilesGroupInfo in binary_attr:
+        leaked.append("RunfilesGroupInfo")
+    if RunfilesGroupMetadataInfo in binary_attr:
+        leaked.append("RunfilesGroupMetadataInfo")
+    if len(leaked) == 0:
+        return (True, [])
+    return (False, [
+        ("still provides {} even though {} is False.\n" +
+         "Gate emission on lib.is_enabled(ctx) (and merge lib.RULE_ATTRS into the rule's attrs).").format(
+            " and ".join(leaked),
+            _ENABLED_SETTING,
+        ),
+    ])
+
 def _runfiles_group_analysis_test_impl(ctx):
-    if len(ctx.attr.binaries) == 0:
+    # The binaries attribute uses a split transition, so each entry appears once
+    # per branch: with RunfilesGroupInfo emission enabled and with it disabled.
+    enabled_binaries = ctx.split_attr.binaries.get(_ENABLED_KEY, [])
+    disabled_binaries = ctx.split_attr.binaries.get(_DISABLED_KEY, [])
+
+    if len(enabled_binaries) == 0:
         return [AnalysisTestResultInfo(
             success = False,
             message = "runfiles_group_analysis_test with no binaries.",
         )]
 
     results = []
-    for binary_attr in ctx.attr.binaries:
-        results.append((binary_attr.label, _test_one(ctx, binary_attr)))
+    for binary_attr in enabled_binaries:
+        results.append((binary_attr.label, "enabled", _test_one(ctx, binary_attr)))
+    for binary_attr in disabled_binaries:
+        results.append((binary_attr.label, "disabled", _test_one_disabled(binary_attr)))
 
     success = True
     sections = []
-    for label, result in results:
+    for label, config, result in results:
         if not result[0]:
             success = False
             if len(result[1]) > 0:
                 sections.append(
-                    "Issues with {}:\n{}".format(
+                    "Issues with {} [{} = {}]:\n{}".format(
                         label,
+                        _ENABLED_SETTING,
+                        "True" if config == "enabled" else "False",
                         "\n".join([_indent(issue) for issue in result[1]]),
                     ),
                 )
@@ -211,12 +273,22 @@ with the union of all runfiles from RunfilesGroupInfo.
 Additionally, it can warn about entries appearing in multiple groups (overlapping),
 verify the expected ordered group names after applying the full resolution protocol,
 and optionally apply merge-to-limit before ordering.
+
+Every binary is analyzed in two configurations via a split transition, so one test
+target also verifies that the rule honors the global on/off switch
+(@rules_runfiles_group//runfiles_group:enabled):
+
+  * enabled: all of the checks above run against the emitted providers.
+  * disabled: the binary must provide neither RunfilesGroupInfo nor
+    RunfilesGroupMetadataInfo.
+
+Because both branches are pinned by the transition, the test is independent of the
+value the flag has on the command line.
 """,
     attrs = {
         "binaries": attr.label_list(
-            cfg = "target",
+            cfg = _rgi_split_transition,
             mandatory = True,
-            providers = [RunfilesGroupInfo],
             doc = "List of *_binary targets to test.",
         ),
         "overlapping_group_behavior": attr.string(

@@ -60,6 +60,20 @@ lib.collect_groups(ctx, deps, *, strip_executable_group = True)
       groups: dict[str, runfiles]
       metadata: RunfilesGroupMetadataInfo or None
 
+lib.RULE_ATTRS
+    Attribute fragment that *_binary / *_library rule authors merge into their
+    rule's attrs to gain access to the global RunfilesGroupInfo on/off switch
+    (@rules_runfiles_group//runfiles_group:enabled). Paired with lib.is_enabled:
+    a rule that calls lib.is_enabled(ctx) MUST have merged lib.RULE_ATTRS into
+    its attrs, or the read will fail.
+
+lib.is_enabled(ctx)
+    Returns whether RunfilesGroupInfo emission is globally enabled, reading the
+    @rules_runfiles_group//runfiles_group:enabled build setting (default False).
+    Rules should gate provider emission on this and emit no RunfilesGroupInfo
+    when it returns False. Requires lib.RULE_ATTRS to have been merged into the
+    rule's attrs.
+
 lib.RANK_FOUNDATION / lib.RANK_SHARED_DEPS / lib.RANK_EXECUTABLE
     Recommended rank anchors for group_metadata(rank = ...). Foundational
     content (runtimes, interpreters, standard libraries) anchors at
@@ -70,6 +84,7 @@ lib.RANK_FOUNDATION / lib.RANK_SHARED_DEPS / lib.RANK_EXECUTABLE
 """
 
 load("@bazel_features//:features.bzl", "bazel_features")
+load("@bazel_skylib//rules:common_settings.bzl", "BuildSettingInfo")
 load("//runfiles_group/private/providers:runfiles_group_info.bzl", "RunfilesGroupInfo")
 load(
     "//runfiles_group/private/providers:runfiles_group_metadata_info.bzl",
@@ -125,9 +140,7 @@ def _ordered_groups(runfiles_group_info, runfiles_group_metadata_info = None):
             name = name,
             runfiles = getattr(runfiles_group_info, name),
             metadata = (
-                runfiles_group_metadata_info.groups[name]
-                if runfiles_group_metadata_info != None and name in runfiles_group_metadata_info.groups
-                else None
+                runfiles_group_metadata_info.groups[name] if runfiles_group_metadata_info != None and name in runfiles_group_metadata_info.groups else None
             ),
         )
         for name in ordered
@@ -310,6 +323,25 @@ def _collect_groups(ctx, deps, *, strip_executable_group = True):
             metadata = RunfilesGroupMetadataInfo(groups = stripped)
     return struct(groups = groups, metadata = metadata)
 
+# Attribute fragment consumers merge into their rule's attrs to read the global
+# RunfilesGroupInfo on/off switch. Paired with is_enabled(ctx): a rule that
+# calls lib.is_enabled(ctx) must have merged lib.RULE_ATTRS into its attrs.
+#
+# Label("//runfiles_group:enabled") is resolved in this module's repo context,
+# so it points at @rules_runfiles_group//runfiles_group:enabled in every
+# consumer repo — consumers merge in this fragment without naming the flag.
+RULE_ATTRS = {
+    "_runfiles_group_enabled": attr.label(default = Label("//runfiles_group:enabled")),
+}
+
+def _is_enabled(ctx):
+    """Returns whether RunfilesGroupInfo emission is globally enabled.
+
+    Reads the @rules_runfiles_group//runfiles_group:enabled build setting.
+    Requires lib.RULE_ATTRS to have been merged into the rule's attrs.
+    """
+    return ctx.attr._runfiles_group_enabled[BuildSettingInfo].value
+
 lib = struct(
     group_metadata = group_metadata,
     group_names = _group_names,
@@ -318,6 +350,10 @@ lib = struct(
     merge_to_limit = _merge_to_limit,
     merge_metadata = _merge_metadata,
     collect_groups = _collect_groups,
+    # Global on/off switch (see //runfiles_group:enabled). RULE_ATTRS and
+    # is_enabled are a pair — see their docs above.
+    RULE_ATTRS = RULE_ATTRS,
+    is_enabled = _is_enabled,
     # Recommended rank anchors (see README "Recommended rank values").
     RANK_FOUNDATION = _RANK_FOUNDATION,
     RANK_SHARED_DEPS = _RANK_SHARED_DEPS,

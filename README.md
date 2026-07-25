@@ -84,6 +84,56 @@ If splitting runfiles into groups is not a concern for your rule — for example
 
 If your binary does have meaningful groups (interpreter, standard library, first-party code, third-party dependencies, debug symbols, etc.), return `RunfilesGroupInfo` alongside `DefaultInfo` from your rule.
 
+### Honoring the global on/off switch
+
+`RunfilesGroupInfo` (and its metadata) costs a little extra memory on every target that emits it. When no packaging rule in a build consumes those providers, that cost is wasted. `rules_runfiles_group` exposes a single global flag — shared by every producing ruleset — that gates emission. It defaults to **off**, so a build pays for the providers only when it opts in:
+
+```console
+# No RunfilesGroupInfo emitted (the default):
+bazel build //...
+# Emit RunfilesGroupInfo everywhere it is supported:
+bazel build //... --@rules_runfiles_group//runfiles_group:enabled=true
+```
+
+Because the flag defaults to `False`, no providers are emitted out of the box. A build that packages with a rule which consumes `RunfilesGroupInfo` should turn the flag on — most conveniently in its `.bazelrc`, so every command picks it up:
+
+```
+# .bazelrc
+common --@rules_runfiles_group//runfiles_group:enabled=true
+```
+
+Rule authors honor the flag with two pieces from `lib`, which are **a pair**:
+
+1. Merge `lib.RULE_ATTRS` into your rule's `attrs`. This adds a private `_runfiles_group_enabled` attribute pointing at the flag. You don't name the flag yourself — the label is resolved in the `rules_runfiles_group` repo context, so it points at `@rules_runfiles_group//runfiles_group:enabled` automatically in your repo.
+2. Gate provider emission on `lib.is_enabled(ctx)`, returning early before doing any grouping work.
+
+```starlark
+load("@rules_runfiles_group//runfiles_group:lib.bzl", "lib")
+
+_MY_BINARY_ATTRS = {
+    # ... your rule's own attributes ...
+}
+
+my_binary = rule(
+    implementation = _my_binary_impl,
+    # dict(..., **lib.RULE_ATTRS) works on all supported Bazel versions;
+    # _MY_BINARY_ATTRS | lib.RULE_ATTRS is equivalent on newer Starlark.
+    attrs = dict(_MY_BINARY_ATTRS, **lib.RULE_ATTRS),
+    executable = True,
+)
+
+def _my_binary_impl(ctx):
+    providers = [DefaultInfo(...)]
+
+    if not lib.is_enabled(ctx):
+        return providers  # emit no RunfilesGroupInfo when globally disabled
+
+    # ... build groups, then append RunfilesGroupInfo / RunfilesGroupMetadataInfo ...
+    return providers
+```
+
+> A rule that calls `lib.is_enabled(ctx)` **must** have merged `lib.RULE_ATTRS` into its `attrs`; otherwise the read of the `_runfiles_group_enabled` attribute fails. Put the gate at the very top of the RunfilesGroupInfo-producing code path so that when disabled there is no `ctx.runfiles(...)`, no `lib.collect_groups(...)`, and no provider construction.
+
 ### Metadata with `RunfilesGroupMetadataInfo`
 
 Return `RunfilesGroupMetadataInfo` alongside `RunfilesGroupInfo` to declare per-group metadata that controls ordering, merge eligibility, and merge priority.
@@ -237,15 +287,16 @@ Groups with large weight are more likely to be left unmerged. They benefit most 
 
 ### Testing your implementation
 
-Use `runfiles_group_analysis_test` to verify that your `*_binary` rule produces a valid `RunfilesGroupInfo`. The test checks two properties:
+Use `runfiles_group_analysis_test` to verify that your `*_binary` rule produces a valid `RunfilesGroupInfo`. Every binary is analyzed in **two configurations** via a split transition, so a single test target covers three properties:
 
 1. **Completeness.** For each runfiles component (files, empty_filenames, symlinks, root_symlinks), the union of all groups must equal the corresponding component of `DefaultInfo.default_runfiles` exactly — no missing entries, no extra entries.
 2. **Overlap.** It detects entries that appear in more than one group (per component). The `overlapping_group_behavior` attribute controls whether overlaps produce warnings (default) or hard failures.
+3. **Honoring the global switch.** With `@rules_runfiles_group//runfiles_group:enabled` set to `False`, the binary must provide neither `RunfilesGroupInfo` nor `RunfilesGroupMetadataInfo`. Checks 1 and 2 run in the branch where the flag is `True`. Because the transition pins both branches, the test result does not depend on the flag's value on the command line.
 
-When a check fails, the test prints the target label and lists the offending files so you can trace them back to the rule logic that produced them.
+When a check fails, the test prints the target label, which of the two configurations failed, and lists the offending files so you can trace them back to the rule logic that produced them.
 
 > [!CAUTION]
-> This test materializes every depset to compare file sets, making it expensive on large targets. It is meant for rule authors validating their implementation in internal test suites, not for end users running it on every `*_binary` in a production build.
+> This test materializes every depset to compare file sets, making it expensive on large targets, and it analyzes each binary twice. It is meant for rule authors validating their implementation in internal test suites, not for end users running it on every `*_binary` in a production build.
 
 ```starlark
 load("@rules_runfiles_group//runfiles_group:runfiles_group_analysis_test.bzl", "runfiles_group_analysis_test")

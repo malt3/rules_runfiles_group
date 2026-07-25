@@ -1,1 +1,8 @@
 common --incompatible_use_plus_in_repo_names
+
+# RunfilesGroupInfo emission defaults to off (see
+# @rules_runfiles_group//runfiles_group:enabled). Re-enable it here so the
+# runfiles_group analysis tests, which require the providers to be present,
+# exercise the real grouping logic. This makes local + BCR testing easier;
+# individual commands can still override with =false to test the disabled path.
+common --@rules_runfiles_group//runfiles_group:enabled=true

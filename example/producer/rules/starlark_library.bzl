@@ -38,6 +38,23 @@ def _starlark_library_impl(ctx):
     for dep in ctx.attr.data:
         runfiles = runfiles.merge(dep[DefaultInfo].default_runfiles)
 
+    providers = [
+        DefaultInfo(
+            files = depset(direct_srcs),
+            runfiles = runfiles,
+        ),
+        StarlarkInfo(
+            sources = all_sources,
+            loadpath = loadpath,
+            repos = repos,
+        ),
+    ]
+
+    # Honor the global on/off switch: emit no RunfilesGroupInfo when disabled.
+    # DefaultInfo and StarlarkInfo are still returned (deps rely on them).
+    if not lib.is_enabled(ctx):
+        return providers
+
     group_name = _GROUP_PREFIX + loadpath + ":" + ctx.label.name
 
     dep_groups = lib.collect_groups(ctx, ctx.attr.deps)
@@ -56,23 +73,13 @@ def _starlark_library_impl(ctx):
     })
     metadata = lib.merge_metadata(metadata, own_metadata)
 
-    return [
-        DefaultInfo(
-            files = depset(direct_srcs),
-            runfiles = runfiles,
-        ),
-        StarlarkInfo(
-            sources = all_sources,
-            loadpath = loadpath,
-            repos = repos,
-        ),
-        RunfilesGroupInfo(**groups),
-        RunfilesGroupMetadataInfo(groups = metadata.groups),
-    ]
+    providers.append(RunfilesGroupInfo(**groups))
+    providers.append(RunfilesGroupMetadataInfo(groups = metadata.groups))
+    return providers
 
 starlark_library = rule(
     implementation = _starlark_library_impl,
-    attrs = {
+    attrs = dict({
         "srcs": attr.label_list(
             allow_files = [".star", ".bzl"],
             doc = "Starlark source files.",
@@ -103,5 +110,5 @@ another ruleset (the recommendation is to use a module name, e.g. all
 JVM-shaped libraries across modules could use "rules_java").
 """,
         ),
-    },
+    }, **lib.RULE_ATTRS),
 )

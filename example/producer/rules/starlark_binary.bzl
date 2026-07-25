@@ -123,6 +123,10 @@ def _starlark_binary_impl(ctx):
         ),
     ]
 
+    # Honor the global on/off switch: emit no RunfilesGroupInfo when disabled.
+    if not lib.is_enabled(ctx):
+        return providers
+
     if ctx.attr.runfiles_grouping != "disabled":
         groups = {}
 
@@ -252,7 +256,7 @@ def _format_repo(repo_tuple):
 starlark_binary = rule(
     implementation = _starlark_binary_impl,
     executable = True,
-    attrs = {
+    attrs = dict({
         "src": attr.label(
             allow_single_file = [".star", ".bzl"],
             mandatory = True,
@@ -297,7 +301,7 @@ starlark_binary = rule(
             executable = True,
             cfg = "exec",
         ),
-    },
+    }, **lib.RULE_ATTRS),
     toolchains = [
         launcher.finalizer_toolchain_type,
     ],
