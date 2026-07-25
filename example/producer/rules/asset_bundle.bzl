@@ -19,24 +19,30 @@ _AFFINITY = "asset_bundle"
 def _asset_bundle_impl(ctx):
     group_name = _GROUP_PREFIX + ctx.label.name
     runfiles = ctx.runfiles(files = ctx.files.srcs)
-    return [
+    providers = [
         DefaultInfo(
             files = depset(ctx.files.srcs),
             runfiles = runfiles,
         ),
-        RunfilesGroupInfo(**{group_name: runfiles}),
-        RunfilesGroupMetadataInfo(groups = {
-            group_name: lib.group_metadata(
-                rank = lib.RANK_SHARED_DEPS,
-                weight = ctx.attr.weight if ctx.attr.weight > 0 else None,
-                merge_affinity = _AFFINITY,
-            ),
-        }),
     ]
+
+    # Honor the global on/off switch: emit no RunfilesGroupInfo when disabled.
+    if not lib.is_enabled(ctx):
+        return providers
+
+    providers.append(RunfilesGroupInfo(**{group_name: runfiles}))
+    providers.append(RunfilesGroupMetadataInfo(groups = {
+        group_name: lib.group_metadata(
+            rank = lib.RANK_SHARED_DEPS,
+            weight = ctx.attr.weight if ctx.attr.weight > 0 else None,
+            merge_affinity = _AFFINITY,
+        ),
+    }))
+    return providers
 
 asset_bundle = rule(
     implementation = _asset_bundle_impl,
-    attrs = {
+    attrs = dict({
         "srcs": attr.label_list(
             allow_files = True,
             doc = "Asset files bundled into this group.",
@@ -45,5 +51,5 @@ asset_bundle = rule(
             default = 0,
             doc = "Weight hint for this bundle's runfiles group. If > 0, set as the weight in RunfilesGroupMetadataInfo.",
         ),
-    },
+    }, **lib.RULE_ATTRS),
 )
