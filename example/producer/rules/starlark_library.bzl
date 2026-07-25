@@ -32,11 +32,20 @@ def _starlark_library_impl(ctx):
     else:
         loadpath = "//" + ctx.label.package
 
-    runfiles = ctx.runfiles(files = direct_srcs + ctx.files.data)
-    for dep in ctx.attr.deps:
-        runfiles = runfiles.merge(dep[DefaultInfo].default_runfiles)
-    for dep in ctx.attr.data:
-        runfiles = runfiles.merge(dep[DefaultInfo].default_runfiles)
+    # Built once and used both as this library's own group value and as a
+    # component of default_runfiles. Allocating a second, identical runfiles
+    # object for the group would retain it for nothing.
+    own_runfiles = ctx.runfiles(files = direct_srcs)
+
+    # One merge_all instead of a per-dep fold. A fold retains one two-slot array
+    # per step -- NestedSet.create stores a child's `children` array, not the
+    # child node -- and deepens the artifact DAG once per dep, where merge_all
+    # builds a single node and de-dupes identical subsets across all inputs.
+    to_merge = [dep[DefaultInfo].default_runfiles for dep in ctx.attr.deps]
+    to_merge.extend([dep[DefaultInfo].default_runfiles for dep in ctx.attr.data])
+    if ctx.files.data:
+        to_merge.append(ctx.runfiles(files = ctx.files.data))
+    runfiles = own_runfiles.merge_all(to_merge) if to_merge else own_runfiles
 
     providers = [
         DefaultInfo(
@@ -63,7 +72,7 @@ def _starlark_library_impl(ctx):
     groups = {}
     groups.update(dep_groups.groups)
     groups.update(data_groups.groups)
-    groups[group_name] = ctx.runfiles(files = direct_srcs)
+    groups[group_name] = own_runfiles
 
     metadata = lib.merge_metadata(dep_groups.metadata, data_groups.metadata)
     own_weight = ctx.attr.runfiles_weight if ctx.attr.runfiles_weight > 0 else None
@@ -74,8 +83,12 @@ def _starlark_library_impl(ctx):
     metadata = lib.merge_metadata(metadata, own_metadata)
 
     providers.append(RunfilesGroupInfo(**groups))
-    providers.append(RunfilesGroupMetadataInfo(groups = metadata.groups))
+
+    # merge_metadata already returned a RunfilesGroupMetadataInfo. Re-wrapping its
+    # dict would re-validate every entry for nothing.
+    providers.append(metadata)
     return providers
+
 
 starlark_library = rule(
     implementation = _starlark_library_impl,

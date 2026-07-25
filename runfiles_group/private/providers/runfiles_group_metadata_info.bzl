@@ -34,6 +34,21 @@ _DEFAULT_WEIGHT = None
 _DEFAULT_EXECUTABLE_GROUP = False
 _DEFAULT_MERGE_AFFINITY = ""
 
+def _validate(where, rank, do_not_merge, weight, executable_group, merge_affinity):
+    if type(rank) != "int":
+        fail(where, ": rank must be an int, got ", type(rank))
+    if type(do_not_merge) != "bool":
+        fail(where, ": do_not_merge must be a bool, got ", type(do_not_merge))
+    if weight != None:
+        if type(weight) != "int":
+            fail(where, ": weight must be an int or None, got ", type(weight))
+        if weight < 0:
+            fail(where, ": weight must be >= 0, got ", weight)
+    if type(executable_group) != "bool":
+        fail(where, ": executable_group must be a bool, got ", type(executable_group))
+    if type(merge_affinity) != "string":
+        fail(where, ": merge_affinity must be a string, got ", type(merge_affinity))
+
 def group_metadata(*, rank = _DEFAULT_RANK, do_not_merge = _DEFAULT_DO_NOT_MERGE, weight = _DEFAULT_WEIGHT, executable_group = _DEFAULT_EXECUTABLE_GROUP, merge_affinity = _DEFAULT_MERGE_AFFINITY):
     """Creates a validated group metadata struct.
 
@@ -51,31 +66,58 @@ def group_metadata(*, rank = _DEFAULT_RANK, do_not_merge = _DEFAULT_DO_NOT_MERGE
         A struct with rank, do_not_merge, weight, executable_group, and
         merge_affinity fields.
     """
-    if type(rank) != "int":
-        fail("group_metadata: rank must be an int, got ", type(rank))
-    if type(do_not_merge) != "bool":
-        fail("group_metadata: do_not_merge must be a bool, got ", type(do_not_merge))
-    if weight != None:
-        if type(weight) != "int":
-            fail("group_metadata: weight must be an int or None, got ", type(weight))
-        if weight < 0:
-            fail("group_metadata: weight must be >= 0, got ", weight)
-    if type(executable_group) != "bool":
-        fail("group_metadata: executable_group must be a bool, got ", type(executable_group))
-    if type(merge_affinity) != "string":
-        fail("group_metadata: merge_affinity must be a string, got ", type(merge_affinity))
+    _validate("group_metadata", rank, do_not_merge, weight, executable_group, merge_affinity)
+
+    # Collapse the all-defaults case onto the module-level singleton. Module
+    # globals are frozen after the .bzl is loaded, so every caller shares one
+    # 80-byte object instead of allocating its own. Structs compare by value and
+    # Starlark has no identity operator, so this is unobservable.
+    if (rank == _DEFAULT_RANK and do_not_merge == _DEFAULT_DO_NOT_MERGE and
+        weight == _DEFAULT_WEIGHT and executable_group == _DEFAULT_EXECUTABLE_GROUP and
+        merge_affinity == _DEFAULT_MERGE_AFFINITY):
+        return _DEFAULT_METADATA
+
     return struct(rank = rank, do_not_merge = do_not_merge, weight = weight, executable_group = executable_group, merge_affinity = merge_affinity)
 
-_DEFAULT_METADATA = group_metadata()
+_DEFAULT_METADATA = struct(
+    rank = _DEFAULT_RANK,
+    do_not_merge = _DEFAULT_DO_NOT_MERGE,
+    weight = _DEFAULT_WEIGHT,
+    executable_group = _DEFAULT_EXECUTABLE_GROUP,
+    merge_affinity = _DEFAULT_MERGE_AFFINITY,
+)
 
 def _normalize_entry(name, entry):
     if type(entry) == "struct":
-        rank = getattr(entry, "rank", _DEFAULT_RANK)
-        do_not_merge = getattr(entry, "do_not_merge", _DEFAULT_DO_NOT_MERGE)
-        weight = getattr(entry, "weight", _DEFAULT_WEIGHT)
-        executable_group = getattr(entry, "executable_group", _DEFAULT_EXECUTABLE_GROUP)
-        merge_affinity = getattr(entry, "merge_affinity", _DEFAULT_MERGE_AFFINITY)
-        return group_metadata(rank = rank, do_not_merge = do_not_merge, weight = weight, executable_group = executable_group, merge_affinity = merge_affinity)
+        if (hasattr(entry, "rank") and hasattr(entry, "do_not_merge") and
+            hasattr(entry, "weight") and hasattr(entry, "executable_group") and
+            hasattr(entry, "merge_affinity")):
+            # Identity fast path: an entry that already carries all five fields
+            # is validated in place and handed back as the SAME object.
+            #
+            # Rebuilding it would allocate a fresh 80-byte struct for every group
+            # at every level of the dependency graph, and Bazel cannot undo that:
+            # schemaless structs are never interned, and structs nested inside a
+            # dict are never visited by unsafeOptimizeMemoryLayout. Propagating
+            # the identical object upwards is the only sharing mechanism Starlark
+            # offers, and it is what keeps a dep's metadata from being duplicated
+            # into every one of its reverse dependencies.
+            _validate(
+                "RunfilesGroupMetadataInfo entry for group '{}'".format(name),
+                entry.rank,
+                entry.do_not_merge,
+                entry.weight,
+                entry.executable_group,
+                entry.merge_affinity,
+            )
+            return entry
+        return group_metadata(
+            rank = getattr(entry, "rank", _DEFAULT_RANK),
+            do_not_merge = getattr(entry, "do_not_merge", _DEFAULT_DO_NOT_MERGE),
+            weight = getattr(entry, "weight", _DEFAULT_WEIGHT),
+            executable_group = getattr(entry, "executable_group", _DEFAULT_EXECUTABLE_GROUP),
+            merge_affinity = getattr(entry, "merge_affinity", _DEFAULT_MERGE_AFFINITY),
+        )
     if type(entry) == "dict":
         return group_metadata(
             rank = entry.get("rank", _DEFAULT_RANK),

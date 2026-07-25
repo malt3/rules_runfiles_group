@@ -164,81 +164,55 @@ def _cheapest_pair_in_buckets(buckets, meta, default_weight):
     (lighter, heavier), or None. Cost is the combined effective weight of the
     two lightest groups in a bucket. Ties are broken deterministically by
     (cost, rank, lighter, heavier).
+
+    The two lightest are found with a linear two-minimum scan rather than by
+    sorting the bucket: this runs once per merge step, and sorting allocated a
+    decorator array, a key tuple and a Starlark frame per element per step.
     """
     best = None  # (cost, rank, lighter_name, heavier_name)
     for _key, names in buckets.items():
         if len(names) < 2:
             continue
-        weighted = sorted(
-            [(_effective_weight(meta[n], default_weight), n) for n in names],
-            key = lambda pair: (pair[0], pair[1]),
-        )
-        lighter_name = weighted[0][1]
-        heavier_name = weighted[1][1]
-        cost = weighted[0][0] + weighted[1][0]
-        candidate = (cost, meta[lighter_name].rank, lighter_name, heavier_name)
+        w1 = None
+        n1 = None
+        w2 = None
+        n2 = None
+        for name in names:
+            entry = meta.get(name)
+            if entry == None:
+                continue  # merged away in an earlier step
+            w = _effective_weight(entry, default_weight)
+            if n1 == None or w < w1 or (w == w1 and name < n1):
+                w2 = w1
+                n2 = n1
+                w1 = w
+                n1 = name
+            elif n2 == None or w < w2 or (w == w2 and name < n2):
+                w2 = w
+                n2 = name
+        if n2 == None:
+            continue
+        candidate = (w1 + w2, meta[n1].rank, n1, n2)
         if best == None or candidate < best:
             best = candidate
     if best == None:
         return None
     return (best[2], best[3])
 
-def _find_cheapest_pair(groups, meta, default_weight):
-    """Finds the best same-rank mergeable pair. Returns (lighter, heavier) or None.
-
-    Prefers pairs that share the same merge_affinity (the empty string "" is the
-    shared "no affinity" bucket). Among the preferred pairs the cheapest (lowest
-    combined weight) wins. Only when no same-affinity pair exists at any rank
-    does it fall back to merging the cheapest same-rank pair regardless of
-    affinity.
-    """
-    mergeable = [name for name in groups if not meta[name].do_not_merge]
-
-    # Tier 1: prefer merging groups that share the same (rank, merge_affinity).
-    by_rank_affinity = {}
-    for name in mergeable:
-        key = (meta[name].rank, meta[name].merge_affinity)
-        if key not in by_rank_affinity:
-            by_rank_affinity[key] = []
-        by_rank_affinity[key].append(name)
-    pair = _cheapest_pair_in_buckets(by_rank_affinity, meta, default_weight)
-    if pair != None:
-        return pair
-
-    # Tier 2: fall back to the cheapest same-rank pair across affinities.
-    by_rank = {}
-    for name in mergeable:
-        rank = meta[name].rank
-        if rank not in by_rank:
-            by_rank[rank] = []
-        by_rank[rank].append(name)
-    return _cheapest_pair_in_buckets(by_rank, meta, default_weight)
-
-def _merge_pair(groups, meta, lighter, heavier, default_weight, merged_group_name_fn):
-    """Merges lighter into heavier, returns new (groups, meta) dicts."""
-    merged_depsets = groups[lighter] + groups[heavier]
-    merged_weight = _effective_weight(meta[lighter], default_weight) + \
-                    _effective_weight(meta[heavier], default_weight)
-    merged_entry = struct(
-        rank = meta[heavier].rank,
-        do_not_merge = False,
-        weight = merged_weight,
-        executable_group = meta[lighter].executable_group or meta[heavier].executable_group,
-        merge_affinity = meta[heavier].merge_affinity,
-    )
-
-    if merged_group_name_fn != None:
-        lighter_w = _effective_weight(meta[lighter], default_weight)
-        heavier_w = _effective_weight(meta[heavier], default_weight)
-        out_name = merged_group_name_fn(lighter, lighter_w, heavier, heavier_w)
+def _bucket_add(buckets, key, name):
+    bucket = buckets.get(key)
+    if bucket == None:
+        buckets[key] = [name]
     else:
-        out_name = heavier
+        bucket.append(name)
 
-    new_groups = {n: d for n, d in groups.items() if n != lighter and n != heavier}
-    new_groups[out_name] = merged_depsets
-    new_meta = {n: e for n, e in meta.items() if n != lighter and n != heavier}
-    new_meta[out_name] = merged_entry
-    return (new_groups, new_meta)
+def _bucket_remove(buckets, key, name):
+    bucket = buckets.get(key)
+    if bucket != None and name in bucket:
+        bucket.remove(name)
+
+def _affinity_key(entry):
+    return (entry.rank, entry.merge_affinity)
 
 def _merge_to_limit(runfiles_group_info, runfiles_group_metadata_info = None, *, max_groups, default_weight = 0, merged_group_name = None):
     names = _group_names(runfiles_group_info)
@@ -249,79 +223,172 @@ def _merge_to_limit(runfiles_group_info, runfiles_group_metadata_info = None, *,
             group_count = len(names),
         )
 
-    groups = {name: [getattr(runfiles_group_info, name)] for name in names}
     meta = {}
     for name in names:
         meta[name] = _get_metadata(runfiles_group_metadata_info, name)
 
+    # Runfiles are collected per surviving group and merged with a single
+    # merge_all() at the end. A pairwise fold would retain one two-slot array per
+    # step (NestedSet.create stores a child's array, not the child node) and
+    # deepen the artifact DAG once per merge.
+    runfiles = {name: getattr(runfiles_group_info, name) for name in names}
+    parts = {}  # group name -> [runfiles], only for groups that actually merged
+
+    # Buckets are built once and patched incrementally: only the two merged
+    # groups and their replacement change, so rebuilding and re-sorting every
+    # bucket on every step was pure waste.
+    by_rank_affinity = {}
+    by_rank = {}
+    for name, entry in meta.items():
+        if entry.do_not_merge:
+            continue
+        _bucket_add(by_rank_affinity, _affinity_key(entry), name)
+        _bucket_add(by_rank, entry.rank, name)
+
     for _ in range(len(names)):
-        if len(groups) <= max_groups:
+        if len(meta) <= max_groups:
             break
-        pair = _find_cheapest_pair(groups, meta, default_weight)
+
+        # Tier 1: prefer merging groups that share the same (rank, affinity).
+        # Tier 2: fall back to the cheapest same-rank pair across affinities.
+        pair = _cheapest_pair_in_buckets(by_rank_affinity, meta, default_weight)
+        if pair == None:
+            pair = _cheapest_pair_in_buckets(by_rank, meta, default_weight)
         if pair == None:
             break
-        groups, meta = _merge_pair(groups, meta, pair[0], pair[1], default_weight, merged_group_name)
 
-    flat = {}
-    for name, ds in groups.items():
-        flat[name] = ds[0] if len(ds) == 1 else ds[0].merge_all(ds[1:])
-    merged_rgi = RunfilesGroupInfo(**flat)
-    merged_metadata = RunfilesGroupMetadataInfo(groups = meta) if meta else runfiles_group_metadata_info
+        lighter, heavier = pair
+        light = meta.pop(lighter)
+        heavy = meta.pop(heavier)
+        _bucket_remove(by_rank_affinity, _affinity_key(light), lighter)
+        _bucket_remove(by_rank_affinity, _affinity_key(heavy), heavier)
+        _bucket_remove(by_rank, light.rank, lighter)
+        _bucket_remove(by_rank, heavy.rank, heavier)
+
+        light_weight = _effective_weight(light, default_weight)
+        heavy_weight = _effective_weight(heavy, default_weight)
+        if merged_group_name != None:
+            out_name = merged_group_name(lighter, light_weight, heavier, heavy_weight)
+            if type(out_name) != "string" or not out_name:
+                fail("merge_to_limit: merged_group_name must return a non-empty string, got ", type(out_name))
+
+            # Silently overwriting a third, untouched group would drop its
+            # runfiles and violate its do_not_merge.
+            if out_name in meta:
+                fail("merge_to_limit: merged_group_name('{}', '{}') returned '{}', which is an existing group".format(
+                    lighter,
+                    heavier,
+                    out_name,
+                ))
+        else:
+            out_name = heavier
+
+        acc = parts.pop(heavier, None)
+        if acc == None:
+            acc = [runfiles.pop(heavier)]
+        light_parts = parts.pop(lighter, None)
+        if light_parts == None:
+            acc.append(runfiles.pop(lighter))
+        else:
+            acc.extend(light_parts)
+        parts[out_name] = acc
+
+        merged_entry = struct(
+            rank = heavy.rank,
+            do_not_merge = False,
+            weight = light_weight + heavy_weight,
+            executable_group = light.executable_group or heavy.executable_group,
+            merge_affinity = heavy.merge_affinity,
+        )
+        meta[out_name] = merged_entry
+        _bucket_add(by_rank_affinity, _affinity_key(merged_entry), out_name)
+        _bucket_add(by_rank, merged_entry.rank, out_name)
+
+    for name, acc in parts.items():
+        runfiles[name] = acc[0] if len(acc) == 1 else acc[0].merge_all(acc[1:])
+
     return struct(
-        runfiles_group_info = merged_rgi,
-        runfiles_group_metadata_info = merged_metadata,
-        group_count = len(groups),
+        runfiles_group_info = RunfilesGroupInfo(**runfiles),
+        runfiles_group_metadata_info = RunfilesGroupMetadataInfo(groups = meta) if meta else runfiles_group_metadata_info,
+        group_count = len(runfiles),
     )
 
 def _merge_metadata(*metadatas):
-    result = None
+    """Dict-merges RunfilesGroupMetadataInfo instances. Per-key last-wins.
+
+    Allocates one dict and one provider regardless of arity, and returns the sole
+    non-None argument by identity. Building one of each per argument meant every
+    extra dep re-copied and re-validated the whole accumulated dict.
+    """
+    first = None
+    merged = None
     for m in metadatas:
         if m == None:
             continue
-        if result == None:
-            result = m
-        else:
-            merged = dict(result.groups)
+        if merged != None:
             merged.update(m.groups)
-            result = RunfilesGroupMetadataInfo(groups = merged)
-    return result
+        elif first == None:
+            first = m
+        else:
+            merged = dict(first.groups)
+            merged.update(m.groups)
+    if merged == None:
+        return first
+    return RunfilesGroupMetadataInfo(groups = merged)
 
 def _collect_groups(ctx, deps, *, strip_executable_group = True):
     groups = {}
-    metadata = None
+    meta = {}
+    has_metadata = False
     ungrouped = []
     for dep in deps:
         if RunfilesGroupInfo in dep:
-            for name in _group_names(dep[RunfilesGroupInfo]):
-                groups[name] = getattr(dep[RunfilesGroupInfo], name)
+            runfiles_group_info = dep[RunfilesGroupInfo]
+            for name in _group_names(runfiles_group_info):
+                groups[name] = getattr(runfiles_group_info, name)
             if RunfilesGroupMetadataInfo in dep:
-                metadata = _merge_metadata(metadata, dep[RunfilesGroupMetadataInfo])
+                has_metadata = True
+
+                # Entries are carried over by identity, so a dep's metadata
+                # structs are shared rather than rebuilt at every level.
+                meta.update(dep[RunfilesGroupMetadataInfo].groups)
         else:
-            ungrouped.append(("data#" + str(dep.label), dep))
-    for group_name, dep in ungrouped:
-        groups[group_name] = ctx.runfiles(
-            transitive_files = dep[DefaultInfo].files,
-        ).merge_all([dep[DefaultInfo].default_runfiles])
-    if strip_executable_group and metadata != None:
-        needs_strip = False
-        for entry in metadata.groups.values():
-            if entry.executable_group:
-                needs_strip = True
-                break
-        if needs_strip:
-            stripped = {}
-            for name, entry in metadata.groups.items():
-                if entry.executable_group:
-                    stripped[name] = group_metadata(
-                        rank = entry.rank,
-                        do_not_merge = entry.do_not_merge,
-                        weight = entry.weight,
-                        merge_affinity = entry.merge_affinity,
-                    )
-                else:
-                    stripped[name] = entry
-            metadata = RunfilesGroupMetadataInfo(groups = stripped)
-    return struct(groups = groups, metadata = metadata)
+            ungrouped.append(dep)
+    for dep in ungrouped:
+        # Read DefaultInfo once: every access on a target that does not return it
+        # explicitly constructs a fresh DelegatingDefaultInfo, and every .files
+        # read a fresh depset wrapper.
+        default_info = dep[DefaultInfo]
+        runfiles = default_info.default_runfiles
+
+        # default_runfiles is None for a rule that set only data_runfiles.
+        if runfiles == None:
+            runfiles = ctx.runfiles()
+        files = default_info.files
+
+        # Truth-testing a depset is O(1). Skipping the wrapper for a dep that
+        # contributes no files avoids a runfiles object and a nested set per
+        # (target, data dep) edge, retained for the life of the provider.
+        if files:
+            runfiles = ctx.runfiles(transitive_files = files).merge(runfiles)
+        groups["data#" + str(dep.label)] = runfiles
+    if strip_executable_group and has_metadata:
+        # Patch only the flagged entries. Rebuilding the whole dict would also
+        # de-share every entry that did not need changing.
+        flagged = [name for name, entry in meta.items() if entry.executable_group]
+        for name in flagged:
+            entry = meta[name]
+            meta[name] = group_metadata(
+                rank = entry.rank,
+                do_not_merge = entry.do_not_merge,
+                weight = entry.weight,
+                merge_affinity = entry.merge_affinity,
+            )
+    return struct(
+        groups = groups,
+        metadata = RunfilesGroupMetadataInfo(groups = meta) if has_metadata else None,
+    )
+
 
 # Attribute fragment consumers merge into their rule's attrs to read the global
 # RunfilesGroupInfo on/off switch. Paired with is_enabled(ctx): a rule that
