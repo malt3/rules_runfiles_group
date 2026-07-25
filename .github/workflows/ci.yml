@@ -22,3 +22,29 @@ jobs:
       - uses: actions/checkout@v4
       - run: bazel build //...
       - run: cd example && bazel test //... ${{ matrix.bazel_version == '7.x' && '--incompatible_use_plus_in_repo_names' || '' }}
+
+  # Guards the asymptote, not an absolute byte count: the retained heap a single
+  # library adds on top of its dependencies must not grow when the transitive
+  # closure grows. A design whose per-target cost is independent of the group
+  # count gives a ratio near 1.0; a flat bottom-up copy of all transitive groups
+  # gives ~2.0 when the closure doubles. Shape-based, so it survives the
+  # constants moving between Bazel versions.
+  heap:
+    runs-on: ubuntu-latest
+    env:
+      # `bazel dump --memory` does not exist before Bazel 8.
+      USE_BAZEL_VERSION: "9.x"
+    steps:
+      - uses: actions/checkout@v4
+      - name: retained heap per library is flat in closure size
+        working-directory: example
+        run: |
+          set -euo pipefail
+          # A fresh server per measurement: the graph persists across commands
+          # and several Bazel interners are process-global, so measuring two
+          # closures in one server cross-contaminates them.
+          for n in 250 500; do
+            bazel shutdown
+            ../tools/shallow_bytes.sh "//stress:chain${n}_lib$((n - 1))" > "/tmp/shallow_${n}.txt"
+          done
+          python3 ../tools/heap_budget.py /tmp/shallow_250.txt /tmp/shallow_500.txt --max-growth 1.3

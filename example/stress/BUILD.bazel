@@ -1,0 +1,22 @@
+load(":gen.bzl", "stress_closure")
+
+package(default_visibility = ["//visibility:public"])
+
+exports_files(["stress.star"])
+
+# Sizes are chosen so that the CI guard has two points an octave apart (250/500)
+# and there is one closure large enough to make the absolute numbers obvious.
+stress_closure(
+    name = "chain250",
+    n = 250,
+)
+
+stress_closure(
+    name = "chain500",
+    n = 500,
+)
+
+stress_closure(
+    name = "chain2000",
+    n = 2000,
+)
