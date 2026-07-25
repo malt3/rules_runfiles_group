@@ -133,6 +133,34 @@ starlark_binary(
     data = ["//src/shell_app:greeter"],
 )
 
+# Two libraries listing the same data file. Each one synthesizes its own
+# "data#@@//src:shared.txt" entry, with its own runfiles object, so the binary's
+# entry depset contains that group name twice. Resolving folds the duplicates into
+# one group by unioning their runfiles -- if it resolved last-wins instead, a pair
+# of same-named groups with different contents would silently lose one side.
+#
+# srcs is empty on purpose: both libraries would otherwise need a source file each
+# just to avoid overlapping with one another.
+starlark_library(
+    name = "lib_shares_a",
+    data = ["shared.txt"],
+)
+
+starlark_library(
+    name = "lib_shares_b",
+    data = ["shared.txt"],
+)
+
+starlark_binary(
+    name = "shared_data_demo",
+    src = "empty.star",
+    runfiles_grouping = "by_target",
+    deps = [
+        ":lib_shares_a",
+        ":lib_shares_b",
+    ],
+)
+
 fake_package(
     name = "adder_pkg",
     binary = ":adder",
@@ -165,7 +193,27 @@ runfiles_group_analysis_test(
         ":3p_deps_demo",
         ":merge_demo",
         ":data_has_executable",
+        ":shared_data_demo",
     ],
+)
+
+# The shared data file must end up in exactly one group, and the completeness and
+# overlap checks must both pass -- which they cannot if the fold duplicated or
+# dropped it.
+runfiles_group_analysis_test(
+    name = "test_shared_data_groups",
+    binaries = [":shared_data_demo"],
+    check_disabled = False,
+    expected_executable_group = P + "entrypoint",
+    expected_group_names = [
+        P + "interpreter",
+        P + "std",
+        "data#@@//src:shared.txt",
+        P + "//src:lib_shares_a",
+        P + "//src:lib_shares_b",
+        P + "entrypoint",
+    ],
+    overlapping_group_behavior = "error",
 )
 
 # Per-binary tests: ordering without group limits
