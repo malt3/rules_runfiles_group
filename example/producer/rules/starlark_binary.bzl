@@ -11,6 +11,12 @@ _GROUP_PREFIX = "starlark_runfiles_group#"
 # matching comment in starlark_library.bzl.
 _AFFINITY = "starlark"
 
+# Module-level so the boxed int is allocated once at load time. StarlarkInt only
+# caches [-128, 99871], so evaluating `lib.RANK_FOUNDATION + 100` in the rule
+# implementation would allocate a fresh 16-byte object per target and retain it
+# inside the metadata struct.
+_RANK_STD = lib.RANK_FOUNDATION + 100
+
 def _canonical_repo_name(ctx):
     return ctx.label.repo_name or "_main"
 
@@ -107,14 +113,24 @@ def _starlark_binary_impl(ctx):
         template_file = ctx.file._launcher,
     )
 
-    # Runfiles: interpreter + entrypoint + loadmap + stdlib + data + all deps
-    runfiles = ctx.runfiles(files = [entrypoint, loadmap, properties] + ctx.files.data)
-    runfiles = runfiles.merge(interpreter_info.default_runfiles)
-    runfiles = runfiles.merge(stdlib[DefaultInfo].default_runfiles)
-    for dep in ctx.attr.deps:
-        runfiles = runfiles.merge(dep[DefaultInfo].default_runfiles)
-    for dep in ctx.attr.data:
-        runfiles = runfiles.merge(dep[DefaultInfo].default_runfiles)
+    # Runfiles: interpreter + entrypoint + loadmap + stdlib + data + all deps.
+    #
+    # The entrypoint bundle is built once and reused as the "entrypoint" group
+    # value below, so the two are the same object. The executable is already part
+    # of default_runfiles for an executable Starlark rule, so naming it here
+    # changes nothing about the contents.
+    entrypoint_runfiles = ctx.runfiles(files = [output, entrypoint, loadmap, properties])
+
+    # One merge_all rather than a fold: see the comment in starlark_library.bzl.
+    to_merge = [
+        interpreter_info.default_runfiles,
+        stdlib[DefaultInfo].default_runfiles,
+    ]
+    if ctx.files.data:
+        to_merge.append(ctx.runfiles(files = ctx.files.data))
+    to_merge.extend([dep[DefaultInfo].default_runfiles for dep in ctx.attr.deps])
+    to_merge.extend([dep[DefaultInfo].default_runfiles for dep in ctx.attr.data])
+    runfiles = entrypoint_runfiles.merge_all(to_merge)
 
     providers = [
         DefaultInfo(
@@ -145,14 +161,12 @@ def _starlark_binary_impl(ctx):
 
         # Special group: std
         groups[_GROUP_PREFIX + "std"] = stdlib[DefaultInfo].default_runfiles
-        metadata[_GROUP_PREFIX + "std"] = lib.group_metadata(rank = lib.RANK_FOUNDATION + 100, merge_affinity = _AFFINITY)
+        metadata[_GROUP_PREFIX + "std"] = lib.group_metadata(rank = _RANK_STD, merge_affinity = _AFFINITY)
 
         # Dep groups
         if ctx.attr.runfiles_grouping == "by_target":
             groups.update(data_groups.groups)
-            groups[_GROUP_PREFIX + "entrypoint"] = ctx.runfiles(
-                files = [output, entrypoint, loadmap, properties],
-            )
+            groups[_GROUP_PREFIX + "entrypoint"] = entrypoint_runfiles
             metadata[_GROUP_PREFIX + "entrypoint"] = lib.group_metadata(rank = lib.RANK_EXECUTABLE, executable_group = True, merge_affinity = _AFFINITY)
             for name in data_groups.groups:
                 metadata[name] = _dep_group_metadata(dep_metadata, name, own_repo)
@@ -163,9 +177,7 @@ def _starlark_binary_impl(ctx):
         elif ctx.attr.runfiles_grouping == "by_repo":
             repo_runfiles = {}
             repo_weights = {}
-            repo_runfiles[own_repo] = [ctx.runfiles(
-                files = [output, entrypoint, loadmap, properties],
-            )]
+            repo_runfiles[own_repo] = [entrypoint_runfiles]
             all_dep_groups = {}
             all_dep_groups.update(data_groups.groups)
             all_dep_groups.update(dep_groups.groups)
