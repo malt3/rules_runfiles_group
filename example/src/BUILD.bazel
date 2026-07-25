@@ -153,6 +153,9 @@ fake_package(
     binary = ":3p_deps_demo",
 )
 
+# This one test covers the "emits nothing when the switch is off" contract for
+# every binary, so the per-binary tests below opt out of the disabled branch
+# (check_disabled = False) instead of analyzing each closure a second time.
 runfiles_group_analysis_test(
     name = "test_runfiles_group_invariants",
     binaries = [
@@ -175,6 +178,7 @@ runfiles_group_analysis_test(
 runfiles_group_analysis_test(
     name = "test_adder_groups",
     binaries = [":adder"],
+    check_disabled = False,
     expected_group_names = [
         P + "interpreter",
         P + "std",
@@ -192,6 +196,7 @@ runfiles_group_analysis_test(
 runfiles_group_analysis_test(
     name = "test_hasher_groups",
     binaries = [":hasher"],
+    check_disabled = False,
     expected_group_names = [
         P + "interpreter",
         P + "std",
@@ -204,6 +209,7 @@ runfiles_group_analysis_test(
 runfiles_group_analysis_test(
     name = "test_3p_deps_demo_groups",
     binaries = [":3p_deps_demo"],
+    check_disabled = False,
     expected_group_names = [
         P + "interpreter",
         P + "std",
@@ -225,6 +231,7 @@ runfiles_group_analysis_test(
 runfiles_group_analysis_test(
     name = "test_adder_groups_merged",
     binaries = [":adder"],
+    check_disabled = False,
     expected_group_names = [
         P + "interpreter",
         P + "std",
@@ -243,6 +250,7 @@ runfiles_group_analysis_test(
 runfiles_group_analysis_test(
     name = "test_adder_groups_cross_affinity",
     binaries = [":adder"],
+    check_disabled = False,
     expected_group_names = [
         P + "interpreter",
         P + "std",
@@ -258,6 +266,7 @@ runfiles_group_analysis_test(
 runfiles_group_analysis_test(
     name = "test_hasher_groups_merged",
     binaries = [":hasher"],
+    check_disabled = False,
     # interpreter has do_not_merge, and the remaining groups are each alone
     # in their rank, so merging cannot reduce below 4.
     expected_group_count = 4,
@@ -275,6 +284,7 @@ runfiles_group_analysis_test(
 runfiles_group_analysis_test(
     name = "test_3p_deps_demo_groups_merged",
     binaries = [":3p_deps_demo"],
+    check_disabled = False,
     # fizzbuzz and stringutil (both rank 0) merge into fizzbuzz+stringutil.
     expected_group_names = [
         P + "interpreter",
@@ -303,6 +313,7 @@ fake_package(
 runfiles_group_analysis_test(
     name = "test_merge_demo_groups",
     binaries = [":merge_demo"],
+    check_disabled = False,
     expected_group_names = [
         P + "interpreter",
         P + "std",
@@ -321,6 +332,7 @@ runfiles_group_analysis_test(
 runfiles_group_analysis_test(
     name = "test_merge_demo_max6",
     binaries = [":merge_demo"],
+    check_disabled = False,
     expected_group_names = [
         P + "interpreter",
         P + "std",
@@ -338,6 +350,7 @@ runfiles_group_analysis_test(
 runfiles_group_analysis_test(
     name = "test_merge_demo_max5",
     binaries = [":merge_demo"],
+    check_disabled = False,
     expected_group_names = [
         P + "interpreter",
         P + "std",
@@ -354,6 +367,7 @@ runfiles_group_analysis_test(
 runfiles_group_analysis_test(
     name = "test_merge_demo_max4",
     binaries = [":merge_demo"],
+    check_disabled = False,
     expected_group_names = [
         P + "interpreter",
         P + "std",
@@ -370,6 +384,7 @@ runfiles_group_analysis_test(
 runfiles_group_analysis_test(
     name = "test_merge_demo_max3",
     binaries = [":merge_demo"],
+    check_disabled = False,
     expected_group_count = 4,
     expected_group_names = [
         P + "interpreter",

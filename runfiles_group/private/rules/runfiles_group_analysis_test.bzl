@@ -37,11 +37,17 @@ _ENABLED_SETTING = str(Label("//runfiles_group:enabled"))
 _ENABLED_KEY = "runfiles_group_enabled"
 _DISABLED_KEY = "runfiles_group_disabled"
 
-def _rgi_split_transition_impl(_settings, _attr):
-    return {
-        _ENABLED_KEY: {_ENABLED_SETTING: True},
-        _DISABLED_KEY: {_ENABLED_SETTING: False},
-    }
+def _rgi_split_transition_impl(_settings, attr):
+    branches = {_ENABLED_KEY: {_ENABLED_SETTING: True}}
+
+    # The disabled branch analyzes every target in the binary's closure a second
+    # time, because the flag lands in BuildOptions.starlarkOptionsMap and is
+    # fingerprinted into the configuration key. That is the price of checking the
+    # one MUST in the producer contract, so it stays on by default, but it is
+    # opt-out for tests over large binaries.
+    if attr.check_disabled:
+        branches[_DISABLED_KEY] = {_ENABLED_SETTING: False}
+    return branches
 
 # Analyze every binary under test in both configurations, so a single test
 # target checks both that the groups are well formed when the providers are
@@ -105,15 +111,32 @@ def _test_one(ctx, binary_attr):
     # This analysis test is only meant to be used to test the correctness of
     # RunfilesGroupInfo emitting rules. Do not use for all of your *_binary targets in prod.
     group_names = lib.group_names(runfiles_group_info)
+    check_overlap = ctx.attr.overlapping_group_behavior != "ignore"
 
     # Check completeness and overlap for each runfiles component.
     for component_name, get_depset in _RUNFILES_COMPONENTS:
         all_default = sets.make(get_depset(default_runfiles).to_list())
         all_grouped = sets.make()
+
+        # Overlap is detected in the same pass, by remembering the first group
+        # that claimed each entry. Intersecting every pair of groups instead
+        # meant flattening and re-hashing every group O(G) times.
+        first_owner = {}
+        overlaps = {}  # (first owner, other group) -> [entries]
         for gn in group_names:
-            group_rf = getattr(runfiles_group_info, gn)
-            for item in get_depset(group_rf).to_list():
+            for item in get_depset(getattr(runfiles_group_info, gn)).to_list():
                 sets.insert(all_grouped, item)
+                if not check_overlap:
+                    continue
+                owner = first_owner.get(item)
+                if owner == None:
+                    first_owner[item] = gn
+                    continue
+                pair = (owner, gn)
+                if pair in overlaps:
+                    overlaps[pair].append(item)
+                else:
+                    overlaps[pair] = [item]
 
         runfiles_match = sets.is_equal(all_default, all_grouped)
         if not runfiles_match:
@@ -131,27 +154,18 @@ def _test_one(ctx, binary_attr):
                     "\n".join([_INDENT + str(item) for item in sets.to_list(extra_in_groups)]),
                 )
 
-        if ctx.attr.overlapping_group_behavior != "ignore":
-            for i in range(len(group_names)):
-                group_i = sets.make(get_depset(getattr(runfiles_group_info, group_names[i])).to_list())
-                for j in range(i + 1, len(group_names)):
-                    group_j = sets.make(get_depset(getattr(runfiles_group_info, group_names[j])).to_list())
-                    overlap = sets.intersection(group_i, group_j)
-                    if sets.length(overlap) > 0:
-                        msg = (
-                            "{}: groups '{}' and '{}' overlap:\n".format(
-                                component_name,
-                                group_names[i],
-                                group_names[j],
-                            ) +
-                            "\n".join([_INDENT + str(item) for item in sets.to_list(overlap)])
-                        )
-                        if ctx.attr.overlapping_group_behavior == "error":
-                            success = False
-                            issues.append(msg)
-                        else:
-                            # buildifier: disable=print
-                            print("WARNING [{}]: {}".format(binary_attr.label, msg))
+        for pair, items in overlaps.items():
+            msg = (
+                "{}: groups '{}' and '{}' overlap:\n".format(component_name, pair[0], pair[1]) +
+                "\n".join([_INDENT + str(item) for item in items])
+            )
+            if ctx.attr.overlapping_group_behavior == "error":
+                success = False
+                issues.append(msg)
+            else:
+                # buildifier: disable=print
+                print("WARNING [{}]: {}".format(binary_attr.label, msg))
+
 
     # Apply the full resolution protocol (merge + ordering) and check expected group names.
     rgi = runfiles_group_info
@@ -280,7 +294,8 @@ target also verifies that the rule honors the global on/off switch
 
   * enabled: all of the checks above run against the emitted providers.
   * disabled: the binary must provide neither RunfilesGroupInfo nor
-    RunfilesGroupMetadataInfo.
+    RunfilesGroupMetadataInfo. Set check_disabled = False to skip this branch,
+    which avoids analyzing the binary's whole closure a second time.
 
 Because both branches are pinned by the transition, the test is independent of the
 value the flag has on the command line.
@@ -290,6 +305,19 @@ value the flag has on the command line.
             cfg = _rgi_split_transition,
             mandatory = True,
             doc = "List of *_binary targets to test.",
+        ),
+        "check_disabled": attr.bool(
+            default = True,
+            doc = """\
+Also analyze every binary with @rules_runfiles_group//runfiles_group:enabled set
+to False and verify it emits neither RunfilesGroupInfo nor
+RunfilesGroupMetadataInfo.
+
+This is the only automated check of the producer contract's one MUST, so it is on
+by default. It does cost a second configuration for the binary and its entire
+transitive closure, so set it to False on tests over large binaries and keep one
+small target that checks it. Must not be a select().
+""",
         ),
         "overlapping_group_behavior": attr.string(
             doc = "How to handle overlapping groups (the same entry being present in more than one group).",

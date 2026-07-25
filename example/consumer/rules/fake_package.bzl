@@ -8,10 +8,15 @@ load(
     "RunfilesGroupTransformInfo",
 )
 
+# The aspect hands the *providers* to the rule, not lib.ordered_groups()'s
+# output. Ordering is O(G log G) and transient; retaining the ordered list would
+# keep a list plus one struct per group alive on every packaging target for the
+# life of the build.
 _FakePackageGroupsInfo = provider(
-    doc = "Resolved and ordered runfiles groups from the aspect pipeline.",
+    doc = "Runfiles groups of a binary after hint metadata and hint transforms.",
     fields = {
-        "ordered_groups": "list of struct(name, runfiles, metadata) entries.",
+        "runfiles_group_info": "RunfilesGroupInfo, after all transforms.",
+        "runfiles_group_metadata_info": "RunfilesGroupMetadataInfo or None.",
     },
 )
 
@@ -36,25 +41,47 @@ def _fake_package_aspect_impl(target, ctx):
             rgi = result.runfiles_group_info
             metadata = result.runfiles_group_metadata_info
 
-    # 4. Apply ordering by rank.
-    ordered = lib.ordered_groups(rgi, metadata)
-
-    return [_FakePackageGroupsInfo(ordered_groups = ordered)]
+    return [_FakePackageGroupsInfo(
+        runfiles_group_info = rgi,
+        runfiles_group_metadata_info = metadata,
+    )]
 
 _fake_package_aspect = aspect(
     implementation = _fake_package_aspect_impl,
 )
 
+def _short_path(file):
+    return file.short_path
+
 def _fake_package_impl(ctx):
     groups_info = ctx.attr.binary[_FakePackageGroupsInfo]
-    ordered = groups_info.ordered_groups
 
-    # Build JSON debug output (list to preserve order).
-    groups_list = []
+    # 4. Apply ordering by rank.
+    ordered = lib.ordered_groups(
+        groups_info.runfiles_group_info,
+        groups_info.runfiles_group_metadata_info,
+    )
+
+    # Write the manifest from an Args object rather than a string built during
+    # analysis: json.encode(...) over every path materialized an O(all files)
+    # string and ctx.actions.write stored it inside the action, retained for the
+    # whole build. With Args, only the (already shared) nested sets are held and
+    # the file is rendered at execution time.
+    #
+    # before_each rather than format_each: group names are arbitrary strings and
+    # '%' is legal in a label, which would corrupt a format template.
+    args = ctx.actions.args()
+    args.set_param_file_format("multiline")
     for entry in ordered:
-        groups_list.append({"group": entry.name, "files": [f.path for f in entry.runfiles.files.to_list()]})
-    json_file = ctx.actions.declare_file(ctx.label.name + ".json")
-    ctx.actions.write(json_file, json.encode(groups_list))
+        args.add_all(
+            entry.runfiles.files,
+            before_each = entry.name,
+            map_each = _short_path,
+            expand_directories = False,
+        )
+
+    manifest = ctx.actions.declare_file(ctx.label.name + ".manifest")
+    ctx.actions.write(manifest, args)
 
     # Build OutputGroupInfo.
     output_groups = {}
@@ -62,7 +89,7 @@ def _fake_package_impl(ctx):
         output_groups[entry.name] = entry.runfiles.files
 
     return [
-        DefaultInfo(files = depset([json_file])),
+        DefaultInfo(files = depset([manifest])),
         OutputGroupInfo(**output_groups),
     ]
 
