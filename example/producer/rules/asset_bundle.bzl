@@ -9,7 +9,7 @@ to keep each ruleset's groups together before mixing across rulesets.
 """
 
 load("@rules_runfiles_group//runfiles_group:lib.bzl", "lib")
-load("@rules_runfiles_group//runfiles_group:providers.bzl", "RunfilesGroupInfo", "RunfilesGroupMetadataInfo")
+load("@rules_runfiles_group//runfiles_group:providers.bzl", "RunfilesGroupInfo")
 
 _GROUP_PREFIX = "asset_bundle#"
 
@@ -30,15 +30,18 @@ def _asset_bundle_impl(ctx):
     if not lib.is_enabled(ctx):
         return providers
 
-    providers.append(RunfilesGroupInfo(**{group_name: runfiles}))
-    providers.append(RunfilesGroupMetadataInfo(groups = {
-        group_name: lib.group_metadata(
-            rank = lib.RANK_SHARED_DEPS,
-            weight = ctx.attr.weight if ctx.attr.weight > 0 else None,
-            merge_affinity = _AFFINITY,
-        ),
-    }))
+    # A leaf: one group of its own, nothing to collect. The runfiles object is the
+    # same one DefaultInfo carries, so the group costs a pointer.
+    providers.append(RunfilesGroupInfo(entries = lib.entries([lib.entry(
+        name = group_name,
+        runfiles = runfiles,
+        kind = "first_party",
+        rank = lib.RANK_SHARED_DEPS,
+        weight = ctx.attr.weight if ctx.attr.weight > 0 else None,
+        merge_affinity = _AFFINITY,
+    )])))
     return providers
+
 
 asset_bundle = rule(
     implementation = _asset_bundle_impl,
@@ -49,7 +52,7 @@ asset_bundle = rule(
         ),
         "weight": attr.int(
             default = 0,
-            doc = "Weight hint for this bundle's runfiles group. If > 0, set as the weight in RunfilesGroupMetadataInfo.",
+            doc = "Weight hint for this bundle's runfiles group. If > 0, set as the group entry's weight.",
         ),
     }, **lib.RULE_ATTRS),
 )

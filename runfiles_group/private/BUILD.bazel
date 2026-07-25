@@ -5,9 +5,10 @@ bzl_library(
     srcs = ["lib.bzl"],
     visibility = ["//:__subpackages__"],
     deps = [
+        "//runfiles_group/private/providers:runfiles_group_entry_info",
         "//runfiles_group/private/providers:runfiles_group_info",
         "//runfiles_group/private/providers:runfiles_group_metadata_info",
-        "@bazel_features//:features",
+        "//runfiles_group/private/providers:runfiles_group_transform_info",
         "@bazel_skylib//rules:common_settings",
     ],
 )

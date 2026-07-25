@@ -1,7 +1,7 @@
 """Implementation of the starlark_library rule."""
 
 load("@rules_runfiles_group//runfiles_group:lib.bzl", "lib")
-load("@rules_runfiles_group//runfiles_group:providers.bzl", "RunfilesGroupInfo", "RunfilesGroupMetadataInfo")
+load("@rules_runfiles_group//runfiles_group:providers.bzl", "RunfilesGroupInfo")
 load("//producer/providers:providers.bzl", "StarlarkInfo")
 
 _GROUP_PREFIX = "starlark_runfiles_group#"
@@ -65,28 +65,31 @@ def _starlark_library_impl(ctx):
         return providers
 
     group_name = _GROUP_PREFIX + loadpath + ":" + ctx.label.name
-
-    dep_groups = lib.collect_groups(ctx, ctx.attr.deps)
-    data_groups = lib.collect_groups(ctx, ctx.attr.data)
-
-    groups = {}
-    groups.update(dep_groups.groups)
-    groups.update(data_groups.groups)
-    groups[group_name] = own_runfiles
-
-    metadata = lib.merge_metadata(dep_groups.metadata, data_groups.metadata)
     own_weight = ctx.attr.runfiles_weight if ctx.attr.runfiles_weight > 0 else None
     own_affinity = ctx.attr.merge_affinity if ctx.attr.merge_affinity else _AFFINITY
-    own_metadata = RunfilesGroupMetadataInfo(groups = {
-        group_name: lib.group_metadata(weight = own_weight, merge_affinity = own_affinity),
-    })
-    metadata = lib.merge_metadata(metadata, own_metadata)
 
-    providers.append(RunfilesGroupInfo(**groups))
-
-    # merge_metadata already returned a RunfilesGroupMetadataInfo. Re-wrapping its
-    # dict would re-validate every entry for nothing.
-    providers.append(metadata)
+    # One entry of its own plus the dependencies' entry depsets by reference. No
+    # dict, no per-level copy of the transitive group set: the cost of this
+    # provider is independent of how many groups the closure contains.
+    #
+    # The own entry goes through `own =` rather than into a second, wrapping
+    # depset, so the depset gains only one level of depth per library rather than
+    # two -- which doubles how deep a dependency chain may get before Bazel's
+    # nested set depth limit rejects it.
+    providers.append(RunfilesGroupInfo(entries = lib.collect(
+        ctx,
+        deps = ctx.attr.deps,
+        data = ctx.attr.data,
+        own = [lib.entry(
+            name = group_name,
+            runfiles = own_runfiles,
+            # A library in an external repository is third-party code as far as a
+            # packager is concerned; one in this workspace is not.
+            kind = "third_party" if ctx.attr.repository else "first_party",
+            weight = own_weight,
+            merge_affinity = own_affinity,
+        )],
+    )))
     return providers
 
 
@@ -111,7 +114,7 @@ starlark_library = rule(
         ),
         "runfiles_weight": attr.int(
             default = 0,
-            doc = "Weight hint for this library's runfiles group. If > 0, set as the weight in RunfilesGroupMetadataInfo.",
+            doc = "Weight hint for this library's runfiles group. If > 0, set as the group entry's weight.",
         ),
         "merge_affinity": attr.string(
             default = "",

@@ -2,7 +2,7 @@
 
 load("@hermetic_launcher//launcher:lib.bzl", "launcher")
 load("@rules_runfiles_group//runfiles_group:lib.bzl", "lib")
-load("@rules_runfiles_group//runfiles_group:providers.bzl", "RunfilesGroupInfo", "RunfilesGroupMetadataInfo")
+load("@rules_runfiles_group//runfiles_group:providers.bzl", "RunfilesGroupInfo")
 load("//producer/providers:providers.bzl", "StarlarkInfo")
 
 _GROUP_PREFIX = "starlark_runfiles_group#"
@@ -144,69 +144,101 @@ def _starlark_binary_impl(ctx):
         return providers
 
     if ctx.attr.runfiles_grouping != "disabled":
-        groups = {}
-
-        dep_groups = lib.collect_groups(ctx, ctx.attr.deps)
-        data_groups = lib.collect_groups(ctx, ctx.attr.data)
-        dep_metadata = lib.merge_metadata(dep_groups.metadata, data_groups.metadata)
-
-        metadata = {}
         own_repo = ctx.attr.repository
 
-        # Special group: interpreter
-        groups[_GROUP_PREFIX + "interpreter"] = ctx.runfiles(
-            files = [interpreter_exe],
-        ).merge(interpreter_info.default_runfiles)
-        metadata[_GROUP_PREFIX + "interpreter"] = lib.group_metadata(rank = lib.RANK_FOUNDATION, do_not_merge = True, merge_affinity = _AFFINITY)
+        # Both grouping modes re-shape the collected groups, so this binary is a
+        # "materializing" target: it flattens the dependencies' entry depset once.
+        # A *_library must never do this -- it only ever calls lib.collect().
+        collected = lib.resolve(
+            lib.collect(ctx, deps = ctx.attr.deps, data = ctx.attr.data),
+            aspect_hints = [],
+        )
 
-        # Special group: std
-        groups[_GROUP_PREFIX + "std"] = stdlib[DefaultInfo].default_runfiles
-        metadata[_GROUP_PREFIX + "std"] = lib.group_metadata(rank = _RANK_STD, merge_affinity = _AFFINITY)
+        entries = [
+            # Special group: interpreter.
+            lib.entry(
+                name = _GROUP_PREFIX + "interpreter",
+                runfiles = ctx.runfiles(files = [interpreter_exe]).merge(interpreter_info.default_runfiles),
+                kind = "foundation",
+                rank = lib.RANK_FOUNDATION,
+                do_not_merge = True,
+                merge_affinity = _AFFINITY,
+            ),
+            # Special group: std.
+            lib.entry(
+                name = _GROUP_PREFIX + "std",
+                runfiles = stdlib[DefaultInfo].default_runfiles,
+                kind = "foundation",
+                rank = _RANK_STD,
+                merge_affinity = _AFFINITY,
+            ),
+        ]
 
-        # Dep groups
         if ctx.attr.runfiles_grouping == "by_target":
-            groups.update(data_groups.groups)
-            groups[_GROUP_PREFIX + "entrypoint"] = entrypoint_runfiles
-            metadata[_GROUP_PREFIX + "entrypoint"] = lib.group_metadata(rank = lib.RANK_EXECUTABLE, executable_group = True, merge_affinity = _AFFINITY)
-            for name in data_groups.groups:
-                metadata[name] = _dep_group_metadata(dep_metadata, name, own_repo)
-            for name, rf in dep_groups.groups.items():
-                groups[name] = rf
-                metadata[name] = _dep_group_metadata(dep_metadata, name, own_repo)
+            # One group per transitive target, re-ranked relative to this binary.
+            # lib.derive carries weight, merge_affinity and kind through, so
+            # re-ranking cannot silently reset them.
+            executable_group = _GROUP_PREFIX + "entrypoint"
+            entries.append(lib.entry(
+                name = executable_group,
+                runfiles = entrypoint_runfiles,
+                kind = "first_party",
+                rank = lib.RANK_EXECUTABLE,
+                merge_affinity = _AFFINITY,
+            ))
+            if collected != None:
+                for entry in collected.groups:
+                    entries.append(lib.derive(entry, rank = _dep_rank(entry.name, own_repo)))
 
         elif ctx.attr.runfiles_grouping == "by_repo":
-            repo_runfiles = {}
+            # One group per repository. Members' weights are summed, and their
+            # affinity and kind adopted, so the aggregate still carries usable
+            # merge hints.
+            repo_runfiles = {own_repo: [entrypoint_runfiles]}
             repo_weights = {}
-            repo_runfiles[own_repo] = [entrypoint_runfiles]
-            all_dep_groups = {}
-            all_dep_groups.update(data_groups.groups)
-            all_dep_groups.update(dep_groups.groups)
             repo_affinities = {}
-            for name, rf in all_dep_groups.items():
-                repo = _extract_repo(name)
-                if repo not in repo_runfiles:
-                    repo_runfiles[repo] = []
-                repo_runfiles[repo].append(rf)
-                w = _get_dep_weight(dep_metadata, name)
-                if w != None:
-                    repo_weights[repo] = repo_weights.get(repo, 0) + w
+            repo_kinds = {}
+            if collected != None:
+                for entry in collected.groups:
+                    repo = _extract_repo(entry.name)
+                    repo_runfiles.setdefault(repo, []).append(entry.runfiles)
+                    if entry.weight != None:
+                        repo_weights[repo] = repo_weights.get(repo, 0) + entry.weight
 
-                # A repo group aggregates its members' groups. Adopt a member's
-                # affinity if one is set; data deps without RunfilesGroupInfo
-                # contribute the empty affinity and never override it.
-                affinity = _get_dep_affinity(dep_metadata, name)
-                if affinity:
-                    repo_affinities[repo] = affinity
-            for repo, rs in repo_runfiles.items():
+                    # Data deps without RunfilesGroupInfo contribute the empty
+                    # affinity and kind, which never override a member's.
+                    if entry.merge_affinity:
+                        repo_affinities[repo] = entry.merge_affinity
+                    if entry.kind:
+                        repo_kinds[repo] = entry.kind
+
+            executable_group = _GROUP_PREFIX + (own_repo or "_main")
+            for repo, parts in repo_runfiles.items():
                 group_name = _GROUP_PREFIX + (repo or "_main")
-                groups[group_name] = rs[0] if len(rs) == 1 else rs[0].merge_all(rs[1:])
+                merged = parts[0] if len(parts) == 1 else parts[0].merge_all(parts[1:])
                 if repo == own_repo:
-                    metadata[group_name] = lib.group_metadata(rank = lib.RANK_EXECUTABLE, weight = repo_weights.get(repo, None), executable_group = True, merge_affinity = _AFFINITY)
+                    entries.append(lib.entry(
+                        name = group_name,
+                        runfiles = merged,
+                        kind = "first_party",
+                        rank = lib.RANK_EXECUTABLE,
+                        weight = repo_weights.get(repo, None),
+                        merge_affinity = _AFFINITY,
+                    ))
                 else:
-                    metadata[group_name] = lib.group_metadata(rank = lib.RANK_SHARED_DEPS, weight = repo_weights.get(repo, None), merge_affinity = repo_affinities.get(repo, ""))
+                    entries.append(lib.entry(
+                        name = group_name,
+                        runfiles = merged,
+                        kind = repo_kinds.get(repo, ""),
+                        rank = lib.RANK_SHARED_DEPS,
+                        weight = repo_weights.get(repo, None),
+                        merge_affinity = repo_affinities.get(repo, ""),
+                    ))
 
-        providers.append(RunfilesGroupInfo(**groups))
-        providers.append(RunfilesGroupMetadataInfo(groups = metadata))
+        providers.append(RunfilesGroupInfo(
+            entries = lib.entries(entries),
+            executable_group = executable_group,
+        ))
 
     return providers
 
@@ -231,36 +263,15 @@ def _extract_repo(group_name):
         return ""
     return group_name[1:idx]
 
-def _get_dep_weight(dep_metadata, name):
-    if dep_metadata == None:
-        return None
-    entry = dep_metadata.groups.get(name, None)
-    if entry == None:
-        return None
-    return entry.weight
-
-def _get_dep_affinity(dep_metadata, name):
-    if dep_metadata == None:
-        return ""
-    entry = dep_metadata.groups.get(name, None)
-    if entry == None:
-        return ""
-    return entry.merge_affinity
-
-def _dep_group_metadata(dep_metadata, name, own_repo):
-    """Metadata for a collected dep/data group in by_target grouping.
+def _dep_rank(name, own_repo):
+    """Rank for a collected dep/data group in by_target grouping.
 
     First-party (own-repo) groups sit just below the executable; third-party
-    groups anchor at the shared-deps rank. Weight and merge_affinity are carried
-    through from the collected metadata so the packager can merge intelligently.
+    groups anchor at the shared-deps rank.
     """
-    weight = _get_dep_weight(dep_metadata, name)
-    affinity = _get_dep_affinity(dep_metadata, name)
     if _extract_repo(name) == own_repo:
-        rank = lib.RANK_EXECUTABLE - 1
-    else:
-        rank = lib.RANK_SHARED_DEPS
-    return lib.group_metadata(rank = rank, weight = weight, merge_affinity = affinity)
+        return lib.RANK_EXECUTABLE - 1
+    return lib.RANK_SHARED_DEPS
 
 def _format_repo(repo_tuple):
     return repo_tuple[0] + "\0" + repo_tuple[1]

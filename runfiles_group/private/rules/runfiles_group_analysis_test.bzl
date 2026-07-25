@@ -99,47 +99,48 @@ def _test_one(ctx, binary_attr):
     success = True
     default_info = binary_attr[DefaultInfo]
     default_runfiles = default_info.default_runfiles
-    if RunfilesGroupInfo not in binary_attr:
+
+    # lib.resolve() also validates every entry and that executable_group names a
+    # surviving group, so a malformed provider fails here with the binary's label
+    # rather than inside somebody's packaging rule.
+    resolved = lib.resolve(binary_attr, aspect_hints = [])
+    if resolved == None:
         return (False, [
             "doesn't provide RunfilesGroupInfo even though {} is True.".format(_ENABLED_SETTING),
         ])
-    runfiles_group_info = binary_attr[RunfilesGroupInfo]
     if default_runfiles == None:
         return (False, ["doesn't have default_runfiles to compare to."])
+
+    check_overlap = ctx.attr.overlapping_group_behavior != "ignore"
 
     # Note: the following calculations are expensive.
     # This analysis test is only meant to be used to test the correctness of
     # RunfilesGroupInfo emitting rules. Do not use for all of your *_binary targets in prod.
-    group_names = lib.group_names(runfiles_group_info)
-    check_overlap = ctx.attr.overlapping_group_behavior != "ignore"
-
-    # Check completeness and overlap for each runfiles component.
     for component_name, get_depset in _RUNFILES_COMPONENTS:
         all_default = sets.make(get_depset(default_runfiles).to_list())
         all_grouped = sets.make()
 
-        # Overlap is detected in the same pass, by remembering the first group
-        # that claimed each entry. Intersecting every pair of groups instead
-        # meant flattening and re-hashing every group O(G) times.
+        # Overlap is detected in the same pass, by remembering the first group that
+        # claimed each entry. Intersecting every pair of groups instead meant
+        # flattening and re-hashing every group O(G) times.
         first_owner = {}
         overlaps = {}  # (first owner, other group) -> [entries]
-        for gn in group_names:
-            for item in get_depset(getattr(runfiles_group_info, gn)).to_list():
+        for entry in resolved.groups:
+            for item in get_depset(entry.runfiles).to_list():
                 sets.insert(all_grouped, item)
                 if not check_overlap:
                     continue
                 owner = first_owner.get(item)
                 if owner == None:
-                    first_owner[item] = gn
+                    first_owner[item] = entry.name
                     continue
-                pair = (owner, gn)
+                pair = (owner, entry.name)
                 if pair in overlaps:
                     overlaps[pair].append(item)
                 else:
                     overlaps[pair] = [item]
 
-        runfiles_match = sets.is_equal(all_default, all_grouped)
-        if not runfiles_match:
+        if not sets.is_equal(all_default, all_grouped):
             success = False
             missing_from_groups = sets.difference(all_default, all_grouped)
             extra_in_groups = sets.difference(all_grouped, all_default)
@@ -166,42 +167,33 @@ def _test_one(ctx, binary_attr):
                 # buildifier: disable=print
                 print("WARNING [{}]: {}".format(binary_attr.label, msg))
 
-
-    # Apply the full resolution protocol (merge + ordering) and check expected group names.
-    rgi = runfiles_group_info
-    metadata = binary_attr[RunfilesGroupMetadataInfo] if RunfilesGroupMetadataInfo in binary_attr else None
-
+    # Apply the optional group limit and check the resulting names and count.
     if ctx.attr.max_groups >= 0:
         join_fn = _make_join_group_names(ctx.attr.group_name_prefix) if ctx.attr.group_name_prefix else _join_group_names
-        merged = lib.merge_to_limit(
-            rgi,
-            metadata,
+        resolved = lib.limit(
+            resolved,
             max_groups = ctx.attr.max_groups,
             merged_group_name = join_fn,
         )
-        rgi = merged.runfiles_group_info
-        metadata = merged.runfiles_group_metadata_info
         if ctx.attr.expected_group_count >= 0:
-            if merged.group_count != ctx.attr.expected_group_count:
+            if resolved.group_count != ctx.attr.expected_group_count:
                 success = False
                 issues.append(
                     "expected {} groups after merging but got {}".format(
                         ctx.attr.expected_group_count,
-                        merged.group_count,
+                        resolved.group_count,
                     ),
                 )
-        elif merged.group_count > ctx.attr.max_groups:
+        elif resolved.group_count > ctx.attr.max_groups:
             success = False
             issues.append(
                 "max_groups={} requested but merging could only reduce to {} groups".format(
                     ctx.attr.max_groups,
-                    merged.group_count,
+                    resolved.group_count,
                 ),
             )
 
-    ordered = lib.ordered_groups(rgi, metadata)
-    actual_names = [entry.name for entry in ordered]
-
+    actual_names = [entry.name for entry in resolved.groups]
     if ctx.attr.expected_group_names:
         if actual_names != ctx.attr.expected_group_names:
             success = False
@@ -212,13 +204,12 @@ def _test_one(ctx, binary_attr):
                 _INDENT + str(actual_names),
             )
 
-    executable_groups = [entry.name for entry in ordered if entry.metadata and entry.metadata.executable_group]
-    if len(executable_groups) > 1:
+    if ctx.attr.expected_executable_group and resolved.executable_group != ctx.attr.expected_executable_group:
         success = False
-        issues.append(
-            "at most one group may set executable_group = True, but found {}:\n".format(len(executable_groups)) +
-            "\n".join([_INDENT + name for name in executable_groups]),
-        )
+        issues.append("expected executable_group '{}' but got {}".format(
+            ctx.attr.expected_executable_group,
+            repr(resolved.executable_group),
+        ))
 
     return (success, issues)
 
@@ -284,8 +275,11 @@ Checks that RunfilesGroupInfo is well formed by comparing all runfiles component
 (files, empty_filenames, symlinks, root_symlinks) of DefaultInfo.default_runfiles
 with the union of all runfiles from RunfilesGroupInfo.
 
+Resolving the provider also validates every group entry and that executable_group,
+if set, names a surviving group.
+
 Additionally, it can warn about entries appearing in multiple groups (overlapping),
-verify the expected ordered group names after applying the full resolution protocol,
+verify the expected ordered group names, verify which group carries the executable,
 and optionally apply merge-to-limit before ordering.
 
 Every binary is analyzed in two configurations via a split transition, so one test
@@ -319,19 +313,20 @@ transitive closure, so set it to False on tests over large binaries and keep one
 small target that checks it. Must not be a select().
 """,
         ),
-        "overlapping_group_behavior": attr.string(
-            doc = "How to handle overlapping groups (the same entry being present in more than one group).",
-            default = "warn",
-            values = ["warn", "ignore", "error"],
-        ),
         "expected_group_names": attr.string_list(
             doc = """\
 If set, the test verifies that the ordered group names (after optional merging and rank-based ordering)
 match this list exactly. Applies to all binaries in the test.
 """,
         ),
+        "expected_executable_group": attr.string(
+            doc = """\
+If set, the test verifies that RunfilesGroupInfo.executable_group (after optional
+merging) is exactly this group name. Applies to all binaries in the test.
+""",
+        ),
         "max_groups": attr.int(
-            doc = "If >= 0, apply lib.merge_to_limit with this limit before ordering. -1 means no limit.",
+            doc = "If >= 0, apply lib.limit with this limit before ordering. -1 means no limit.",
             default = -1,
         ),
         "expected_group_count": attr.int(
@@ -348,6 +343,11 @@ If set, merged group names will strip this prefix from the second (heavier) grou
 before joining with '+'. This avoids repeating a common prefix in merged names.
 For example, with prefix "p#", merging "p#foo" and "p#bar" produces "p#foo+bar" instead of "p#foo+p#bar".
 """,
+        ),
+        "overlapping_group_behavior": attr.string(
+            doc = "How to handle overlapping groups (the same entry being present in more than one group).",
+            default = "warn",
+            values = ["warn", "ignore", "error"],
         ),
     },
     analysis_test = True,
