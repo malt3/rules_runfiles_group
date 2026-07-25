@@ -33,6 +33,7 @@ pkg_creator(
 - [Guidance for users](#guidance-for-users)
 - [Guidance for *_binary rule authors](#guidance-for-binary-rule-authors)
 - [Guidance for package rule authors](#guidance-for-package-rule-authors)
+- [Memory](#memory)
 - [Compatibility](#compatibility)
 
 ## Providers at a glance
@@ -40,9 +41,23 @@ pkg_creator(
 | Provider | `*_binary` rule | `aspect_hints` | Required | Purpose |
 |----------|:-:|:-:|:-:|---------|
 | `DefaultInfo` | **must** return | — | yes | Defines the executable and runfiles tree. Used as fallback when `RunfilesGroupInfo` is missing or the consumer doesn't support it. |
-| `RunfilesGroupInfo` | may return | — | no | Splits `DefaultInfo.default_runfiles` into named runfiles groups. |
-| `RunfilesGroupMetadataInfo` | may return | may add | no | Per-group metadata (rank, do_not_merge, weight, executable_group, merge_affinity) controlling ordering, merge behavior, executable placement, and merge grouping. |
-| `RunfilesGroupTransformInfo` | — | may add | no | Transforms groups and metadata (e.g., exclude a group, remap names). |
+| `RunfilesGroupInfo` | may return | — | no | Splits `DefaultInfo.default_runfiles` into named runfiles groups, and names the group that carries the executable. |
+| `RunfilesGroupMetadataInfo` | rarely | may add | no | Per-group metadata *overrides* for groups you don't own. Producers put metadata directly on their groups instead. |
+| `RunfilesGroupTransformInfo` | — | may add | no | Transforms the resolved group set (e.g. exclude a group, remap names). |
+
+`RunfilesGroupInfo` has two fields:
+
+```starlark
+RunfilesGroupInfo(
+    entries = <depset of group entries, each built with lib.entry()>,
+    executable_group = <group name, or None>,
+)
+```
+
+Each entry carries its own name, runfiles and metadata, so a target propagates its
+dependencies' groups by *referencing* their depsets rather than copying them. That
+is what keeps a target's cost independent of how many groups its transitive closure
+contains — see [Memory](#memory).
 
 > **Full worked example:** The [`example/`](example/) directory contains a complete end-to-end demo. Look at [`example/producer/`](example/producer/) for `*_binary` rule implementation, [`example/consumer/`](example/consumer/) for packaging rule implementation, and [`example/src/`](example/src/) for user-facing `BUILD` files.
 
@@ -86,7 +101,7 @@ If your binary does have meaningful groups (interpreter, standard library, first
 
 ### Honoring the global on/off switch
 
-`RunfilesGroupInfo` (and its metadata) costs a little extra memory on every target that emits it. When no packaging rule in a build consumes those providers, that cost is wasted. `rules_runfiles_group` exposes a single global flag — shared by every producing ruleset — that gates emission. It defaults to **off**, so a build pays for the providers only when it opts in:
+`RunfilesGroupInfo` costs a little extra memory on every target that emits it. When no packaging rule in a build consumes it, that cost is wasted. `rules_runfiles_group` exposes a single global flag — shared by every producing ruleset — that gates emission. It defaults to **off**, so a build pays for the provider only when it opts in:
 
 ```console
 # No RunfilesGroupInfo emitted (the default):
@@ -128,45 +143,78 @@ def _my_binary_impl(ctx):
     if not lib.is_enabled(ctx):
         return providers  # emit no RunfilesGroupInfo when globally disabled
 
-    # ... build groups, then append RunfilesGroupInfo / RunfilesGroupMetadataInfo ...
+    # ... build entries, then append RunfilesGroupInfo ...
     return providers
 ```
 
-> A rule that calls `lib.is_enabled(ctx)` **must** have merged `lib.RULE_ATTRS` into its `attrs`; otherwise the read of the `_runfiles_group_enabled` attribute fails. Put the gate at the very top of the RunfilesGroupInfo-producing code path so that when disabled there is no `ctx.runfiles(...)`, no `lib.collect_groups(...)`, and no provider construction.
+> A rule that calls `lib.is_enabled(ctx)` **must** have merged `lib.RULE_ATTRS` into its `attrs`; otherwise the read of the `_runfiles_group_enabled` attribute fails. Put the gate at the very top of the RunfilesGroupInfo-producing code path so that when disabled there is no `ctx.runfiles(...)`, no `lib.collect(...)`, and no provider construction.
 
-### Metadata with `RunfilesGroupMetadataInfo`
+### Creating groups
 
-Return `RunfilesGroupMetadataInfo` alongside `RunfilesGroupInfo` to declare per-group metadata that controls ordering, merge eligibility, and merge priority.
-
-Each group can have:
+`lib.entry()` is the only supported way to build a group entry, and it validates everything:
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
+| `name` | str | — | The group name. Prefix it with something unique to your ruleset — see [Naming groups](#naming-groups). |
+| `runfiles` | runfiles | — | The group's contents. |
+| `kind` | str | `""` | One of `lib.KINDS`. A stable, machine-readable selector for packagers. Does **not** affect ordering or merging. |
 | `rank` | int | 0 | Partial ordering key. Lower rank = earlier in the output. Groups at different ranks are never merged together. |
 | `do_not_merge` | bool | False | If True, packaging rules must not merge this group with others. |
 | `weight` | int >= 0 or None | None | Hint for merge priority. Lighter groups are merged first when reducing group count. If None, the packager may apply its own default. |
-| `executable_group` | bool | False | If True, signals that the packager should place the executable file, repo mapping manifest, and other supporting files for the main entrypoint into this group. Only meaningful at the top level — `collect_groups` strips this bit by default (see below). |
-| `merge_affinity` | str | `""` | Best-effort merge grouping hint. When groups must be merged, groups that share the same `merge_affinity` are preferred merge partners (see [Group count limits](#group-count-limits)). The empty string `""` means "no affinity". |
+| `merge_affinity` | str | `""` | Best-effort merge grouping hint. Groups that share the same `merge_affinity` are preferred merge partners (see [Group count limits](#group-count-limits)). The empty string `""` means "no affinity". |
 
-Groups not listed in the metadata dict get default values for all fields (the same applies if `RunfilesGroupMetadataInfo` is missing).
-
-Use the `lib.group_metadata()` helper to create validated metadata entries:
+A leaf rule with one group of its own:
 
 ```starlark
 load("@rules_runfiles_group//runfiles_group:lib.bzl", "lib")
-load("@rules_runfiles_group//runfiles_group:providers.bzl",
-    "RunfilesGroupInfo", "RunfilesGroupMetadataInfo")
+load("@rules_runfiles_group//runfiles_group:providers.bzl", "RunfilesGroupInfo")
 
-providers.append(RunfilesGroupInfo(**groups))
-providers.append(RunfilesGroupMetadataInfo(groups = {
-    "foo_runfiles_group#interpreter": lib.group_metadata(
-        rank = lib.RANK_FOUNDATION, do_not_merge = True, merge_affinity = "rules_foo"),
-    "foo_runfiles_group#std": lib.group_metadata(
-        rank = lib.RANK_FOUNDATION + 100, merge_affinity = "rules_foo"),
-    "foo_runfiles_group#app_code": lib.group_metadata(
-        rank = lib.RANK_EXECUTABLE, weight = 100, executable_group = True, merge_affinity = "rules_foo"),
-}))
+def _asset_bundle_impl(ctx):
+    runfiles = ctx.runfiles(files = ctx.files.srcs)
+    providers = [DefaultInfo(files = depset(ctx.files.srcs), runfiles = runfiles)]
+    if not lib.is_enabled(ctx):
+        return providers
+
+    # Reuse the same runfiles object DefaultInfo carries: the group then costs a
+    # pointer rather than a second copy of the same nested sets.
+    providers.append(RunfilesGroupInfo(entries = lib.entries([lib.entry(
+        name = "asset_bundle#" + ctx.label.name,
+        runfiles = runfiles,
+        kind = "first_party",
+        rank = lib.RANK_SHARED_DEPS,
+        merge_affinity = "asset_bundle",
+    )])))
+    return providers
 ```
+
+There are two recommended ways to build up a graph of groups.
+
+**Bottom-up propagation.** In every `*_library` rule, hand your own entries and your
+dependencies to `lib.collect()`. It contributes your entries directly and references
+your dependencies' depsets, so this is O(1) in the size of the closure:
+
+```starlark
+providers.append(RunfilesGroupInfo(entries = lib.collect(
+    ctx,
+    deps = ctx.attr.deps,
+    data = ctx.attr.data,
+    own = [lib.entry(
+        name = "foo_runfiles_group#" + str(ctx.label),
+        runfiles = own_runfiles,
+        kind = "first_party",
+    )],
+)))
+```
+
+**Aspect-based collection.** Apply an aspect to `deps` in the `*_binary` rule that walks the dependency graph and collects entries. This avoids modifying `*_library` rules but requires an aspect implementation.
+
+> **There is no single best grouping.** Different users have different deployment targets. What works for one packaging ruleset or consumer may not work well for others. Prefer producing fine-grained groups by default and let users merge them via `aspect_hints` with `RunfilesGroupTransformInfo`. This way, you provide the raw material and users shape it to their needs. Set `weight` on groups to help packaging rules make informed merge decisions.
+
+> [!CAUTION]
+> Never call `.to_list()` on a depset in a `*_library` rule — not on runfiles and not on `RunfilesGroupInfo.entries`. `lib.collect()` never flattens anything; `lib.resolve()` does, and it belongs in the packaging rule (or in a `*_binary` rule that genuinely has to re-shape its dependencies' groups, at most once per target).
+
+> [!CAUTION]
+> Merging runfiles in a loop is **not** free. `rf = rf.merge(x)` per dependency retains one two-element array per step and deepens the artifact graph once per dependency. Accumulate a list and call `runfiles.merge_all(list)` once instead — it builds a single node and de-duplicates identical inputs across all of them.
 
 #### Recommended rank values
 
@@ -187,10 +235,26 @@ sub-tiers in between without renumbering everything. For example, an interpreter
 might sit at `RANK_FOUNDATION` while the standard library sits at
 `RANK_FOUNDATION + 100` — both foundational, but strictly ordered.
 
+Assign such a derived rank to a **module-level constant** rather than computing it in
+your rule implementation: Bazel only caches small integers, so `lib.RANK_FOUNDATION + 100`
+evaluated per target allocates a boxed integer per target and retains it.
+
 This ordering maximizes cache reuse in layered formats — base layers change less
 frequently than application code.
 
 Within the same rank, the packager is free to order or merge groups as it sees fit. The partial ordering only guarantees that groups with lower rank appear before groups with higher rank.
+
+#### Classifying groups with `kind`
+
+`kind` is the protocol's stable selector. Group names are ruleset-internal strings,
+usually derived from target labels, so a packager configuration keyed on a group name
+breaks as soon as a target is renamed. `kind` does not, which makes it the right thing
+for a packager's user-facing "include these / exclude those / put these in that layer"
+options.
+
+`lib.KINDS` is a closed set: `""` (unspecified), `"foundation"`, `"third_party"`,
+`"first_party"`, `"debug"`, `"docs"`. It deliberately has **no** effect on ordering or
+merging — that is what `rank` and `merge_affinity` are for.
 
 #### Grouping merges with `merge_affinity`
 
@@ -210,19 +274,6 @@ The empty string `""` means "no affinity". Auto-generated `data#<label>` groups 
 deps that do not themselves provide `RunfilesGroupInfo`) are never assigned an affinity
 — they keep the empty affinity `""`.
 
-### Creating groups
-
-There may be different preferences for splitting files into groups. A good way to support this is to create fine-grained groups in `*_library` rules (and optionally merge them in `*_binary` rules). Two recommended approaches:
-
-**Bottom-up propagation.** In every `*_library` rule, propagate groups from `deps` and add the current target's runfiles to its own group. The `*_binary` rule collects all groups from deps, optionally merging them (e.g., by repository).
-
-**Aspect-based collection.** Apply an aspect to `deps` in the `*_binary` rule that walks the dependency graph and collects runfiles into groups. This avoids modifying `*_library` rules but requires an aspect implementation.
-
-> **There is no single best grouping.** Different users have different deployment targets. What works for one packaging ruleset or consumer may not work well for others. Prefer producing fine-grained groups by default and let users merge them via `aspect_hints` with `RunfilesGroupTransformInfo`. This way, you provide the raw material and users shape it to their needs. Set `weight` on groups to help packaging rules make informed merge decisions.
-
-> [!CAUTION]
-> Merging groups via `runfiles.merge()` is cheap (uses depset transitive under the hood). Calling `.to_list()` on a depset is expensive and should be avoided during analysis. Build group hierarchies purely through `runfiles.merge()` and `runfiles.merge_all()`.
-
 ### Naming groups
 
 Group names are arbitrary strings and live in a shared namespace across all `RunfilesGroupInfo` providers merged into the same binary. If two rulesets independently define a group called `"interpreter"` — say, one for Node.js and one for Python — those groups will be merged together, which may be undesirable.
@@ -230,47 +281,58 @@ Group names are arbitrary strings and live in a shared namespace across all `Run
 To avoid this, **prefix all group names with a string unique to your ruleset**, separated by a delimiter like `#`:
 
 ```starlark
-groups["my_rules_runfiles_group#interpreter"] = ctx.runfiles(files = [...])
-groups["my_rules_runfiles_group#std"] = ctx.runfiles(files = [...])
-groups["my_rules_runfiles_group#" + loadpath + ":" + ctx.label.name] = ctx.runfiles(files = [...])
+lib.entry(name = "my_rules_runfiles_group#interpreter", runfiles = ...)
+lib.entry(name = "my_rules_runfiles_group#std", runfiles = ...)
+lib.entry(name = "my_rules_runfiles_group#" + loadpath + ":" + ctx.label.name, runfiles = ...)
 ```
 
 This ensures that `my_rules_runfiles_group#interpreter` and `other_rules_runfiles_group#interpreter` remain distinct, even when both rulesets contribute groups to the same binary target.
 
-When merging groups (e.g., in `merge_to_limit`), pass a custom `merged_group_name` callback that strips the prefix from the second group name before joining. This keeps merged names readable — `my_rules_runfiles_group#foo+bar` instead of `my_rules_runfiles_group#foo+my_rules_runfiles_group#bar`.
+When merging groups (e.g. in `lib.limit`), pass a custom `merged_group_name` callback that strips the prefix from the second group name before joining. This keeps merged names readable — `my_rules_runfiles_group#foo+bar` instead of `my_rules_runfiles_group#foo+my_rules_runfiles_group#bar`.
+
+Two entries with the *same* name are legal and are folded into one group by
+`lib.resolve()`: their runfiles are unioned, `rank` takes the minimum,
+`do_not_merge` is or-ed, `weight` takes the maximum, and `kind` and `merge_affinity`
+take whichever is set. This is what makes a shared data dependency collapse to one
+group no matter how many targets reach it.
+
+### Marking the group that carries the executable
+
+`RunfilesGroupInfo` only covers the runfiles inside `DefaultInfo.default_runfiles`. A
+well-behaved packager also has to place the remaining pieces of an executable
+somewhere: the runfiles symlinks, the repo mapping manifest, and so on. Set
+`executable_group` to the name of the group where they belong:
+
+```starlark
+RunfilesGroupInfo(
+    entries = lib.entries(entries),
+    executable_group = "foo_runfiles_group#app_code",
+)
+```
+
+`lib.resolve()` fails if `executable_group` names no surviving group, so this cannot
+silently go stale after a rename or a merge. If it is `None`, the packager decides
+where those files go.
+
+It is only meaningful on the **top-level** target. `lib.collect()` never propagates a
+dependency's `executable_group`, so a binary that appears as a `data` dependency of
+another binary cannot claim the outer binary's entrypoint.
 
 ### Handling `deps` and `data`
 
-Most rules have the attributes `deps` and `data`. You should implement support for them carefully.
+Most rules have the attributes `deps` and `data`. `lib.collect()` takes both, and both
+are mandatory keywords, because handling `data` is the classic footgun here — pass
+`data = []` explicitly if your rule has none.
 
-**`deps`** typically come from your own ruleset's `*_library` targets — they will likely provide `RunfilesGroupInfo`, so you should merge the groups and metadata with the others.
+**`deps`** typically come from your own ruleset's `*_library` targets — they will likely provide `RunfilesGroupInfo`, so their entry depsets are referenced directly.
 
-**`data`** can be arbitrary targets. Some may provide `RunfilesGroupInfo` (e.g., a `*_binary` from a ruleset that supports it), while others won't. For targets without `RunfilesGroupInfo`, `collect_groups` automatically creates a named group `data#<canonical label>` whose value is a runfiles combining `DefaultInfo.files` and `DefaultInfo.default_runfiles`. This means that if two parts of the dependency graph share the same data dep, they produce the same group name — the binary-level dict merge naturally deduplicates the group so the data dep's files are recorded only once. These auto-generated `data#` groups carry no metadata, so they keep the default empty `merge_affinity` (`""`): a data dep that does not itself provide `RunfilesGroupInfo` is never assigned an affinity.
-
-By default, `collect_groups` strips the `executable_group` bit from all collected metadata entries. This is the correct behavior for `data` deps: when a binary appears as a data dependency of another binary, its `executable_group` annotation is meaningless because the outer binary has its own entrypoint. The top-level `*_binary` target should set `executable_group` on its own group instead.
-
-```starlark
-dep_groups = lib.collect_groups(ctx, ctx.attr.deps)
-data_groups = lib.collect_groups(ctx, ctx.attr.data)
-
-groups = {}
-groups.update(dep_groups.groups)
-groups.update(data_groups.groups)
-groups["foo_runfiles_group#app_code"] = ctx.runfiles(files = my_own_files)
-
-metadata = lib.merge_metadata(dep_groups.metadata, data_groups.metadata)
-# executable_group has been stripped from dep metadata by collect_groups.
-# Set it (and our ruleset-wide merge_affinity) on our own group instead:
-metadata = lib.merge_metadata(metadata, RunfilesGroupMetadataInfo(groups = {
-    "foo_runfiles_group#app_code": lib.group_metadata(executable_group = True, merge_affinity = "rules_foo"),
-}))
-```
+**`data`** can be arbitrary targets. Some may provide `RunfilesGroupInfo` (e.g. a `*_binary` from a ruleset that supports it), while others won't. For targets without `RunfilesGroupInfo`, `lib.collect` synthesizes an entry named `data#<canonical label>` covering the dep's `DefaultInfo.files` and `DefaultInfo.default_runfiles`. Because the name is derived from the label, two parts of the dependency graph that share the same data dep produce the same group name, and `lib.resolve()` folds them back into one group. These auto-generated `data#` entries carry no `kind` and no `merge_affinity`: a data dep that does not itself provide `RunfilesGroupInfo` is never assigned one.
 
 ### Group count limits
 
-Packaging rules may enforce a maximum group count via `lib.merge_to_limit()`. For example, container image runtimes may limit the total number of layers an image can have. The merge algorithm respects `rank` (only merges within the same rank), `do_not_merge` (never merges protected groups), `merge_affinity` (prefers same-affinity partners), and `weight` (merges lightest groups first).
+Packaging rules may enforce a maximum group count via `lib.limit()`. For example, container image runtimes may limit the total number of layers an image can have. The merge algorithm respects `rank` (only merges within the same rank), `do_not_merge` (never merges protected groups), `merge_affinity` (prefers same-affinity partners), and `weight` (merges lightest groups first).
 
-Concretely, `merge_to_limit` picks each merge in this order:
+Concretely, `lib.limit` picks each merge in this order:
 
 1. **Same rank only.** Groups at different ranks are never merged.
 2. **Prefer same `merge_affinity`.** Among same-rank candidates, it first considers pairs that share a `merge_affinity` (the empty string `""` is the shared "no affinity" bucket). It only falls back to merging across affinities when no same-affinity pair remains at any rank.
@@ -287,16 +349,16 @@ Groups with large weight are more likely to be left unmerged. They benefit most 
 
 ### Testing your implementation
 
-Use `runfiles_group_analysis_test` to verify that your `*_binary` rule produces a valid `RunfilesGroupInfo`. Every binary is analyzed in **two configurations** via a split transition, so a single test target covers three properties:
+Use `runfiles_group_analysis_test` to verify that your `*_binary` rule produces a valid `RunfilesGroupInfo`. Every binary is analyzed in **two configurations** via a split transition, so a single test target covers these properties:
 
-1. **Completeness.** For each runfiles component (files, empty_filenames, symlinks, root_symlinks), the union of all groups must equal the corresponding component of `DefaultInfo.default_runfiles` exactly — no missing entries, no extra entries.
-2. **Overlap.** It detects entries that appear in more than one group (per component). The `overlapping_group_behavior` attribute controls whether overlaps produce warnings (default) or hard failures.
-3. **Honoring the global switch.** With `@rules_runfiles_group//runfiles_group:enabled` set to `False`, the binary must provide neither `RunfilesGroupInfo` nor `RunfilesGroupMetadataInfo`. Checks 1 and 2 run in the branch where the flag is `True`. Because the transition pins both branches, the test result does not depend on the flag's value on the command line.
-
-When a check fails, the test prints the target label, which of the two configurations failed, and lists the offending files so you can trace them back to the rule logic that produced them.
+1. **Well-formedness.** Every entry carries all seven fields, its `kind` is one of `lib.KINDS`, and `executable_group` (if set) names a surviving group. These are checked by `lib.resolve()` itself.
+2. **Completeness.** For each runfiles component (files, empty_filenames, symlinks, root_symlinks), the union of all groups must equal the corresponding component of `DefaultInfo.default_runfiles` exactly — no missing entries, no extra entries.
+3. **Overlap.** It detects entries that appear in more than one group (per component). The `overlapping_group_behavior` attribute controls whether overlaps produce warnings (default) or hard failures.
+4. **Ordering and merging.** `expected_group_names`, `expected_executable_group`, `max_groups` and `expected_group_count` assert the result of the ordering and merge-to-limit steps.
+5. **Honoring the global switch.** With `@rules_runfiles_group//runfiles_group:enabled` set to `False`, the binary must provide neither `RunfilesGroupInfo` nor `RunfilesGroupMetadataInfo`. The other checks run in the branch where the flag is `True`. Because the transition pins both branches, the test result does not depend on the flag's value on the command line.
 
 > [!CAUTION]
-> This test materializes every depset to compare file sets, making it expensive on large targets, and it analyzes each binary twice. It is meant for rule authors validating their implementation in internal test suites, not for end users running it on every `*_binary` in a production build.
+> This test materializes every depset to compare file sets, making it expensive on large targets. `check_disabled = True` (the default) additionally analyzes the binary and its **entire transitive closure** a second time. Keep one test with `check_disabled = True` to cover the global-switch contract and set it to `False` on the rest. This test is meant for rule authors validating their implementation in internal test suites, not for end users running it on every `*_binary` in a production build.
 
 ```starlark
 load("@rules_runfiles_group//runfiles_group:runfiles_group_analysis_test.bzl", "runfiles_group_analysis_test")
@@ -317,72 +379,125 @@ runfiles_group_analysis_test(
 
 ### Resolution protocol
 
-When resolving runfiles groups from a binary target, follow this well-defined order:
+`lib.resolve()` is the whole protocol in one call. It:
 
-1. **Obtain `RunfilesGroupInfo`:** Extract it from the binary target if present. Note: in case `RunfilesGroupInfo` is missing, skip the rest of this protocol and package `DefaultInfo.default_runfiles.files` as a single group instead.
+1. **Obtains the entries.** If the target has no `RunfilesGroupInfo`, it returns `None` — package `DefaultInfo.default_runfiles` as a single group and skip the rest.
+2. **Flattens exactly once** and folds duplicate group names, unioning their runfiles.
+3. **Accumulates metadata overrides**, starting with the target's own `RunfilesGroupMetadataInfo` (if any) and then each `aspect_hints` entry that provides one, per-key last-wins. Each override is a patch: fields it does not carry are left alone.
+4. **Applies transforms** from every `aspect_hints` entry that provides `RunfilesGroupTransformInfo`, in order, re-validating the result of each.
+5. **Orders by `(rank, name)`.**
 
-2. **Accumulate metadata:** Start with the binary's `RunfilesGroupMetadataInfo` (if present). Then iterate `aspect_hints` — for each hint providing `RunfilesGroupMetadataInfo`, dict-merge it into the accumulated metadata using `lib.merge_metadata()`. This is per-key last-wins: hints can override metadata for specific groups without affecting others.
+It returns `struct(groups, by_name, executable_group)`:
 
-3. **Apply transforms:** Iterate through the binary's `aspect_hints` in order. For each hint that provides `RunfilesGroupTransformInfo`, apply it using `lib.transform_groups()`. The transform receives both the current `RunfilesGroupInfo` and `RunfilesGroupMetadataInfo` and returns updated versions of both.
+- `groups`: the entries, ordered.
+- `by_name`: `dict[str, entry]`.
+- `executable_group`: a group name or `None`, guaranteed to be a key of `by_name`.
 
-4. **Optionally merge:** If you need to enforce a maximum group count, call `lib.merge_to_limit(runfiles_group_info, metadata_info, max_groups = N)` before ordering. This merges same-rank groups until the count fits within the limit, preferring same-`merge_affinity` partners and merging the lightest groups first (see [Group count limits](#group-count-limits)). Note: packagers may wish to implement their own group merging strategies instead of `lib.merge_to_limit`.
-
-5. **Apply ordering:** Call `lib.ordered_groups(runfiles_group_info, metadata_info)` to get the final ordered list of `struct(name, runfiles, metadata)` entries, sorted by rank. Each entry has `name` (string), `runfiles` (a runfiles object), and `metadata` (the group's metadata struct, or None if no explicit metadata was set for that group). When a group has `metadata.executable_group == True`, the packager should add the executable file, repo mapping manifest, and other supporting files for the main entrypoint to that group's runfiles.
+Call it **once per consuming target**. It is the only place in the protocol that
+flattens a depset, and its result is meant to be used and discarded — do not store it
+in a provider, and never call it from an aspect that propagates over `attr_aspects`.
 
 ### Using the library
 
 ```starlark
 load("@rules_runfiles_group//runfiles_group:lib.bzl", "lib")
-load("@rules_runfiles_group//runfiles_group:providers.bzl",
-    "RunfilesGroupInfo", "RunfilesGroupMetadataInfo", "RunfilesGroupTransformInfo")
 
-# In your aspect implementation:
-rgi = target[RunfilesGroupInfo]  # always from the target, never from aspect_hints
+# In an aspect, hints are ctx.rule.attr.aspect_hints. In a rule that cannot see
+# them, pass []. The argument is mandatory on purpose: with a default, the correct
+# call and the call that silently ignores every user hint look identical.
+resolved = lib.resolve(target, aspect_hints = ctx.rule.attr.aspect_hints)
 
-# Accumulate metadata from binary + hints
-metadata = target[RunfilesGroupMetadataInfo] if RunfilesGroupMetadataInfo in target else None
-for hint in ctx.rule.attr.aspect_hints:
-    if RunfilesGroupMetadataInfo in hint:
-        metadata = lib.merge_metadata(metadata, hint[RunfilesGroupMetadataInfo])
+if resolved == None:
+    # Mandatory fallback for a binary that does not group its runfiles.
+    resolved = lib.resolved([lib.entry(
+        name = "my_packager#default",
+        runfiles = target[DefaultInfo].default_runfiles,
+    )])
 
-# Apply transforms
-for hint in ctx.rule.attr.aspect_hints:
-    if RunfilesGroupTransformInfo in hint:
-        result = lib.transform_groups(rgi, metadata, hint[RunfilesGroupTransformInfo])
-        rgi = result.runfiles_group_info
-        metadata = result.runfiles_group_metadata_info
+# Optional: enforce a group limit before creating layers.
+resolved = lib.limit(resolved, max_groups = 5)
+if resolved.group_count > 5:
+    fail("could not reduce to 5 groups")  # do_not_merge / rank constraints
 
-# Order by rank
-ordered = lib.ordered_groups(rgi, metadata)
-for entry in ordered:
-    # entry.name: group name (string)
-    # entry.runfiles: runfiles object
-    # entry.metadata: group_metadata struct or None
-    if entry.metadata and entry.metadata.executable_group:
-        # Add executable, runfiles symlinks, repo mapping manifest
-        # to this group's layer.
+for entry in resolved.groups:
+    # entry.name, entry.kind, entry.rank, entry.weight, entry.merge_affinity
+    # entry.runfiles: .files, .symlinks, .root_symlinks, .empty_filenames
+    if entry.name == resolved.executable_group:
+        # Add the executable, the runfiles symlinks and the repo mapping
+        # manifest to this layer.
         ...
     # Create a layer / archive entry / etc.
     ...
-
-# Or merge first if you have a group limit
-result = lib.merge_to_limit(rgi, metadata, max_groups = 5)
-ordered = lib.ordered_groups(result.runfiles_group_info, result.runfiles_group_metadata_info)
 ```
+
+Ordering may not matter for some kinds of packages. In that case, it's advised to still resolve (so that hints are honored) but treat the order of `resolved.groups` as arbitrary.
+
+Key the parts of your API that users configure on `entry.kind`, not on `entry.name`:
+names are ruleset-internal and change when targets are renamed.
 
 ### Respecting `aspect_hints`
 
 Apply an aspect to the `binary` attribute. Inside the aspect, read `ctx.rule.attr.aspect_hints` to access the hint targets and their providers. This is the mechanism through which users customize group behavior without modifying the binary rule.
 
-Note that ordering may not matter for some kinds of packages. In that case, it's advised to still perform the ordering step `lib.ordered_groups(rgi, metadata)`, but treat the intra-rank order as arbitrary.
+If your aspect only exists to reach `aspect_hints`, forward the hint targets to your
+rule and resolve there — that keeps the O(number of groups) work transient instead of
+retained in a provider. [`example/consumer/rules/fake_package.bzl`](example/consumer/rules/fake_package.bzl)
+does exactly this.
 
-### Packaging the executable file itself along with other supporting files
+### Writing a manifest
 
-`RunfilesGroupInfo` only covers the runfiles inside `DefaultInfo.default_runfiles`. A well-behaved packager should also handle the remaining pieces of the executable: the binary file itself, the runfiles symlinks, the repo mapping manifest, etc. These are not part of any runfiles group.
+Do not build a string of runfiles paths during analysis. `json.encode([f.path for f in ...])`
+materializes an O(all files) string and `ctx.actions.write` then retains it inside the
+action for the whole build. Use `ctx.actions.args()` with `add_all(..., map_each = ...)`
+and hand the `Args` object to `ctx.actions.write`: only the (already shared) nested sets
+are held, and the file is rendered at execution time.
 
-When a group's metadata has `executable_group = True`, the packager should add these supporting files to that group. This is the `*_binary` rule's way of saying "this is where my entrypoint lives." If no group is marked `executable_group`, the packager decides where to place them — they could be added to an existing group, placed in a dedicated group, or handled out of band entirely.
+Use `before_each` rather than `format_each` for the group name: group names are
+arbitrary strings and `%` is legal in a label, which would corrupt a format template.
 
-The `executable_group` bit is only meaningful at the top level. When a binary appears as a `data` dependency of another binary, the outer binary has its own entrypoint. For this reason, `lib.collect_groups()` strips `executable_group` from collected metadata by default. The `*_binary` rule should set `executable_group` on its own group rather than inheriting it from deps.
+---
+
+## Memory
+
+The providers of every configured target stay in Bazel's analysis graph for the life
+of the server, so anything a producer retains per target is multiplied by the size of
+the build. Two properties keep that bounded:
+
+- **A target's cost does not depend on its closure.** `lib.collect()` references its
+  dependencies' entry depsets instead of copying their group sets, so a library at the
+  top of a 2000-deep chain retains the same handful of bytes as a leaf. Copying the
+  transitive group set into every level instead is quadratic in the number of
+  group-producing targets, and it is retained.
+- **Group values are existing runfiles objects.** Reuse the object `DefaultInfo`
+  already carries where you can; a freshly wrapped one costs a runfiles object plus a
+  nested set node per group, retained, and shares nothing.
+
+There is one hard limit to know about: a depset's depth grows by one per nesting level
+and Bazel rejects depsets deeper than `--nested_set_depth_limit` (3500 by default).
+Pass your own entries to `lib.collect(own = ...)` rather than wrapping its result in a
+second depset, so a dependency chain costs one level per target rather than two.
+
+To measure a change, the repository ships a synthetic closure generator and two
+scripts:
+
+```console
+cd example
+
+# One library's own retained bytes -- what its providers add on top of its deps.
+# This number must not grow when the closure grows.
+../tools/shallow_bytes.sh //stress:chain250_lib249
+../tools/shallow_bytes.sh //stress:chain500_lib499
+
+# Assert the shape rather than an absolute budget (this is the CI guard).
+bazel shutdown && ../tools/shallow_bytes.sh //stress:chain250_lib249 > /tmp/s250.txt
+bazel shutdown && ../tools/shallow_bytes.sh //stress:chain500_lib499 > /tmp/s500.txt
+python3 ../tools/heap_budget.py /tmp/s250.txt /tmp/s500.txt --max-growth 1.3
+```
+
+`bazel dump --memory` needs Bazel 8 or newer. For a whole-build number instead, compare
+`bazel info used-heap-size-after-gc` after an analysis-only build with the flag off and
+on, with a `bazel shutdown` in between — and exclude `runfiles_group_analysis_test`
+targets, whose split transition analyzes their closures twice.
 
 ---
 
@@ -398,7 +513,6 @@ The `executable_group` bit is only meaningful at the top level. When a binary ap
 
 | Ruleset | Ordering | Merge-to-limit | `aspect_hints` support |
 |---------|----------|----------------|----------------------|
-| [rules_img](https://github.com/bazel-contrib/rules_img) | ✅ | ✅ | ✅ |
 | *Your ruleset here* | | | |
 
 > To add your ruleset to these tables, open a pull request.
