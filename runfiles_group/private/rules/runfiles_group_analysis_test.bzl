@@ -103,7 +103,7 @@ def _test_one(ctx, binary_attr):
     # lib.resolve() also validates every entry and that executable_group names a
     # surviving group, so a malformed provider fails here with the binary's label
     # rather than inside somebody's packaging rule.
-    resolved = lib.resolve(binary_attr, aspect_hints = [])
+    resolved = lib.resolve(ctx, binary_attr, aspect_hints = [])
     if resolved == None:
         return (False, [
             "doesn't provide RunfilesGroupInfo even though {} is True.".format(_ENABLED_SETTING),
@@ -112,6 +112,16 @@ def _test_one(ctx, binary_attr):
         return (False, ["doesn't have default_runfiles to compare to."])
 
     check_overlap = ctx.attr.overlapping_group_behavior != "ignore"
+
+    # Materialized once per group, outside the per-component loop: a group whose
+    # contents are a files-only depset has no symlinks, root symlinks or empty
+    # filenames to read, and lib.runfiles() is what turns "no symlinks" into the
+    # empty depsets the comparison below needs. Doing it inside the loop would build
+    # four runfiles objects per group instead of one.
+    groups = [
+        (lib.name_str(entry.name), lib.runfiles(ctx, entry))
+        for entry in resolved.groups
+    ]
 
     # Note: the following calculations are expensive.
     # This analysis test is only meant to be used to test the correctness of
@@ -125,11 +135,11 @@ def _test_one(ctx, binary_attr):
         # flattening and re-hashing every group O(G) times.
         first_owner = {}
         overlaps = {}  # (first owner, other group) -> [entries]
-        for entry in resolved.groups:
-            # Canonicalized once per group so the diagnostics read the same
-            # whether a group is identified by a Label or by a name.
-            group = lib.name_str(entry.name)
-            for item in get_depset(entry.runfiles).to_list():
+
+        # `group` is the canonical string form, so the diagnostics read the same
+        # whether a group is identified by a Label or by a name.
+        for group, group_runfiles in groups:
+            for item in get_depset(group_runfiles).to_list():
                 sets.insert(all_grouped, item)
                 if not check_overlap:
                     continue
@@ -174,6 +184,7 @@ def _test_one(ctx, binary_attr):
     if ctx.attr.max_groups >= 0:
         join_fn = _make_join_group_names(ctx.attr.group_name_prefix) if ctx.attr.group_name_prefix else _join_group_names
         resolved = lib.limit(
+            ctx,
             resolved,
             max_groups = ctx.attr.max_groups,
             merged_group_name = join_fn,

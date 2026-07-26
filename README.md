@@ -67,7 +67,7 @@ RunfilesGroupInfo(
 )
 ```
 
-Each entry carries its own name, runfiles and metadata, so a target propagates its dependencies'
+Each entry carries its own name, contents and metadata, so a target propagates its dependencies'
 groups by *referencing* their depsets instead of copying them. That is what keeps a target's cost
 independent of how many groups its closure contains — see
 [Keeping analysis memory flat](#keeping-analysis-memory-flat).
@@ -158,7 +158,7 @@ constructors; both validate every field.
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
 | `name` | Label or str | — | The group's identity — see [Naming groups](#naming-groups). |
-| `runfiles` | runfiles | — | The group's contents. |
+| `content` | depset of File, or runfiles | — | The group's contents — see [The two content forms](#the-two-content-forms). |
 | `kind` | str | `""` | One of `lib.KINDS`. A stable, machine-readable selector for packagers. Does **not** affect ordering or merging. |
 | `rank` | int | `0` | Partial ordering key. Lower rank = earlier in the output. Groups at different ranks are never merged. |
 | `do_not_merge` | bool | `False` | If True, packagers must not merge this group. |
@@ -169,22 +169,52 @@ A leaf rule with one group of its own:
 
 ```starlark
 def _asset_bundle_impl(ctx):
-    runfiles = ctx.runfiles(files = ctx.files.srcs)
-    providers = [DefaultInfo(files = depset(ctx.files.srcs), runfiles = runfiles)]
+    files = depset(ctx.files.srcs)
+    providers = [DefaultInfo(files = files, runfiles = ctx.runfiles(transitive_files = files))]
     if not lib.is_enabled(ctx):
         return providers
 
-    # Reuse the runfiles object DefaultInfo already carries: the group then costs
-    # a pointer rather than a second copy of the same nested sets.
+    # This group is only files, so hand the depset over as-is.
     providers.append(RunfilesGroupInfo(entries = lib.entries([lib.entry(
         name = ctx.label,  # a per-target group: no prefix needed
-        runfiles = runfiles,
+        content = files,
         kind = "first_party",
         rank = lib.RANK_SHARED_DEPS,
         merge_affinity = "asset_bundle",
     )])))
     return providers
 ```
+
+### The two content forms
+
+A group's contents are either a **depset of File** or a **runfiles object**, and which one you pass
+is a memory decision, not a semantic one.
+
+**A depset of File** means "this group is only files". Most `*_library` groups are: symlinks, root
+symlinks and empty filenames are things interpreters and launchers need, not source trees. Hand over
+the depset your rule already built and the entry costs nothing beyond the pointer.
+
+**A runfiles object** is the general form, and the only one that can carry symlinks, root symlinks or
+empty filenames. Use it for those, and for contents you received from another rule — never inspect
+somebody else's runfiles object to decide whether it could have been a depset.
+
+Wrapping a files-only depset in a runfiles object costs **64 retained bytes per group** on Bazel 9
+(72 on 7 and 8): a seven-field `Runfiles` plus the nested set node its compile-order builder has to
+allocate, because Starlark depsets are stable-ordered. That is per group *created*, retained for the
+life of the server, and it buys nothing — the depset already says everything the group knows. In this
+repository's own example, moving one library group to the depset form took a library target's
+retained providers from 920 to 856 bytes.
+
+Consumers never have to care which form they get:
+
+```starlark
+lib.files(entry)          # depset of File -- either form, no ctx needed
+lib.runfiles(ctx, entry)  # a runfiles object -- builds one only for the depset form
+lib.union(ctx, contents)  # several groups' contents as one, for a producer that aggregates
+```
+
+`entry.content` itself is opaque. Read it with those, or pass it straight back to `lib.union()` or
+`lib.entry()`; anything else is a bug waiting for the first producer that switches form.
 
 ### Propagating entries
 
@@ -197,7 +227,7 @@ providers.append(RunfilesGroupInfo(entries = lib.collect(
     ctx,
     deps = ctx.attr.deps,
     data = ctx.attr.data,
-    own = [lib.entry(name = ctx.label, runfiles = own_runfiles, kind = "first_party")],
+    own = [lib.entry(name = ctx.label, content = own_files, kind = "first_party")],
 )))
 ```
 
@@ -222,8 +252,8 @@ target owns it, so name it with a **string**. Strings share one namespace across
 `RunfilesGroupInfo` merged into a binary, so **prefix them with something unique to your ruleset**:
 
 ```starlark
-lib.entry(name = ctx.label, runfiles = own_runfiles)        # per-target
-lib.entry(name = "my_rules#interpreter", runfiles = ...)    # named
+lib.entry(name = ctx.label, content = own_files)              # per-target
+lib.entry(name = "my_rules#interpreter", content = ...)       # named
 ```
 
 Both forms are ordered, folded, merged and looked up identically, and `resolved.by_name` is keyed by
@@ -231,9 +261,10 @@ whichever the producer used. Where you need a plain string — an artifact name,
 key, a manifest line, an error message — use `lib.name_str()`.
 
 Two entries with the **same** name are legal: `lib.resolve()` folds them into one group, unioning
-the runfiles and taking `min` of `rank`, `or` of `do_not_merge`, `max` of `weight`, and whichever
+the contents and taking `min` of `rank`, `or` of `do_not_merge`, `max` of `weight`, and whichever
 `kind` and `merge_affinity` is set. That is what collapses a shared data dependency into a single
-group no matter how many targets reach it.
+group no matter how many targets reach it. Contributors to a shared named group need not agree on a
+content form; the fold unions across forms.
 
 ### Recommended rank values
 
@@ -300,27 +331,35 @@ depsets are referenced directly.
 **`data`** can be anything. For targets without `RunfilesGroupInfo`, `lib.collect()` synthesizes a
 per-target entry named by the dep's `Label`, covering its `DefaultInfo.files` and
 `default_runfiles`, with no `kind` and no `merge_affinity`. Because the name *is* the label, two
-paths to the same data dep produce the same group, which `lib.resolve()` folds back into one.
+paths to the same data dep produce the same group, which `lib.resolve()` folds back into one. That
+synthesized entry always uses the runfiles form: deciding otherwise would mean inspecting a foreign
+runfiles object to see whether it holds anything besides files, and reading its `empty_filenames` is
+O(all files) for a dep that carries an empty-files supplier.
 
-Two things a `data` dep must not do, because `lib.collect()` cannot work around either:
+One thing a `data` dep must not do, because `lib.collect()` cannot work around it: rely on its
+executable being inside its own `default_runfiles`. Bazel merges the executable in for Starlark
+rules, but a native one — a single-output `genrule` — publishes empty `default_runfiles` next to a
+perfectly good `files_to_run.executable`. If your rule puts a dependency's executable in a group, put
+the *same* runfiles object into `default_runfiles` rather than assuming it did.
 
-- Publish `DefaultInfo(files = depset(..., order = "topological"))` or `"preorder"`.
-  `ctx.runfiles(transitive_files = ...)` accepts only `"default"` and `"postorder"`, and Starlark
-  can neither read a depset's order back nor change it, so this fails analysis.
-- Rely on its executable being inside its own `default_runfiles`. Bazel merges the executable in for
-  Starlark rules, but a native one — a single-output `genrule` — publishes empty `default_runfiles`
-  next to a perfectly good `files_to_run.executable`. If your rule puts a dependency's executable in
-  a group, put the *same* runfiles object into `default_runfiles` rather than assuming it did.
+A dep publishing `DefaultInfo(files = depset(..., order = "topological"))` or `"preorder"` is fine.
+Those orders are illegal for `ctx.runfiles(transitive_files = ...)`, and Starlark cannot read a
+depset's order back to check — but it can neutralize one, so `lib` rewraps every depset it is handed
+in default order. The rewrap returns the caller's own object when it already was default-ordered, so
+the common path allocates nothing.
 
 ### Testing your implementation
 
 `runfiles_group_analysis_test` analyzes each binary in **two configurations** via a split
 transition, so one target covers:
 
-1. **Well-formedness** — every entry carries all seven fields, `kind` is one of `lib.KINDS`, and
-   `executable_group` (if set) names a surviving group. Checked by `lib.resolve()` itself.
+1. **Well-formedness** — every entry carries all seven fields, `content` is one of the two legal
+   forms, `kind` is one of `lib.KINDS`, and `executable_group` (if set) names a surviving group.
+   Checked by `lib.resolve()` itself.
 2. **Completeness** — per runfiles component (`files`, `empty_filenames`, `symlinks`,
-   `root_symlinks`), the union of all groups must equal `DefaultInfo.default_runfiles` exactly.
+   `root_symlinks`), the union of all groups must equal `DefaultInfo.default_runfiles` exactly. A
+   files-only group contributes its files and nothing to the other three, so a rule whose runfiles
+   carry symlinks cannot cover them with a depset-form group.
 3. **Overlap** — entries appearing in more than one group.
    `overlapping_group_behavior` picks `"warn"` (default), `"error"` or `"ignore"`.
 4. **Ordering and merging** — asserted with `expected_group_names`, `expected_executable_group`,
@@ -356,7 +395,7 @@ runfiles_group_analysis_test(
 
 1. **Obtains the entries.** Returns `None` if the target carries no groups — package
    `DefaultInfo.default_runfiles` as a single group and skip the rest.
-2. **Flattens exactly once** and folds duplicate names, unioning their runfiles.
+2. **Flattens exactly once** and folds duplicate names, unioning their contents.
 3. **Accumulates metadata overrides** — the target's own `RunfilesGroupMetadataInfo` first, then
    each `aspect_hints` entry that provides one, per-key last-wins. Each override is a patch; fields
    it omits are left alone.
@@ -378,25 +417,30 @@ load("@rules_runfiles_group//runfiles_group:lib.bzl", "lib")
 # In an aspect, hints are ctx.rule.attr.aspect_hints; in a rule that cannot see
 # them, pass []. The argument is mandatory on purpose: with a default, the correct
 # call and the one that silently ignores every user hint look identical.
-resolved = lib.resolve(target, aspect_hints = ctx.rule.attr.aspect_hints)
+resolved = lib.resolve(ctx, target, aspect_hints = ctx.rule.attr.aspect_hints)
 
 if resolved == None:
     # Mandatory fallback for a binary that does not group its runfiles.
     resolved = lib.resolved([lib.entry(
         name = "my_packager#default",
-        runfiles = target[DefaultInfo].default_runfiles,
+        content = target[DefaultInfo].default_runfiles,
     )])
 
 # Optional: enforce a group limit before creating layers.
-resolved = lib.limit(resolved, max_groups = 5)
+resolved = lib.limit(ctx, resolved, max_groups = 5)
 if resolved.group_count > 5:
     fail("could not reduce to 5 groups")  # do_not_merge / rank constraints
 
 for entry in resolved.groups:
     # entry.name is a Label (per-target) or a string (named); lib.name_str()
-    # renders either. Also: entry.kind, entry.rank, entry.weight,
-    # entry.merge_affinity, and entry.runfiles with .files, .symlinks,
-    # .root_symlinks and .empty_filenames.
+    # renders either. Also: entry.kind, entry.rank, entry.weight and
+    # entry.merge_affinity.
+    #
+    # Contents go through lib, never through entry.content: lib.files(entry) for
+    # the paths, lib.runfiles(ctx, entry) when you have to place a complete
+    # runfiles tree. See "The two content forms".
+    for file in lib.files(entry).to_list():
+        ...
     if entry.name == resolved.executable_group:
         # Add the executable, the runfiles symlinks and the repo mapping manifest here.
         ...
@@ -447,7 +491,7 @@ rendered at execution time. Render the group name with `lib.name_str()` and pass
 ## Keeping analysis memory flat
 
 Every configured target's providers stay in Bazel's analysis graph for the life of the server, so
-whatever a producer retains per target is multiplied by the size of the build. Four rules keep that
+whatever a producer retains per target is multiplied by the size of the build. Five rules keep that
 bounded:
 
 - **A target's cost must not depend on its closure.** `lib.collect()` references its dependencies'
@@ -457,9 +501,13 @@ bounded:
   `RunfilesGroupInfo.entries`. `lib.collect()` flattens nothing; `lib.resolve()` does, and it
   belongs in the packaging rule (or, at most once per target, in a `*_binary` that genuinely must
   re-shape its dependencies' groups).
-- **Reuse existing runfiles objects** as group values. A freshly wrapped one costs a runfiles object
-  plus a nested set node per group, retained, and shares nothing. For the same reason, never merge
-  runfiles in a loop: accumulate a list and call `runfiles.merge_all()` once.
+- **Give a files-only group its depset, not a runfiles object.** See
+  [The two content forms](#the-two-content-forms): the wrapper is 64 retained bytes per group that
+  say nothing the depset does not. Consumers cope through `lib.files()` and `lib.runfiles()`.
+- **Reuse existing runfiles objects** where you do need the runfiles form. A freshly wrapped one
+  costs a runfiles object plus a nested set node per group, retained, and shares nothing. For the same
+  reason, never merge runfiles in a loop: accumulate a list and call `runfiles.merge_all()` once, or
+  hand the parts to `lib.union()`.
 - **Pass your own entries to `lib.collect(own = ...)`** rather than wrapping its result in a second
   depset, so a dependency chain costs one level of depset depth per target instead of two. Bazel
   rejects depsets deeper than `--nested_set_depth_limit` (3500 by default).

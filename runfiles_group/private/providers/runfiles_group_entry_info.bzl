@@ -61,7 +61,7 @@ KINDS = [
 ]
 
 RunfilesGroupEntryInfo = provider(
-    doc = "One runfiles group: a name, a runfiles object, and its ordering/merge metadata.",
+    doc = "One runfiles group: a name, its contents, and its ordering/merge metadata.",
     fields = {
         "name": """\
 Label or str: the group's identity. A Label means a per-target group -- "the
@@ -70,7 +70,13 @@ globally unique. A string means a named group that several targets contribute to
 prefix those with something unique to your ruleset. lib.name_str() renders either
 form as a string.
 """,
-        "runfiles": "runfiles: the contents of this group.",
+        "content": """\
+runfiles or depset of File: the contents of this group. A depset is the shorthand
+for a group that is only files, which costs a producer nothing to hand over; a
+runfiles object is the general form. Read it with lib.files(entry) or
+lib.runfiles(ctx, entry), which handle both, and pass it to lib.union() or
+lib.entry() unchanged -- the two forms are otherwise not interchangeable.
+""",
         "kind": "str: one of KINDS. A stable selector for packagers. \"\" means unspecified.",
         "rank": "int: partial ordering key. Lower rank = earlier = more cacheable. Default 0.",
         "do_not_merge": "bool: if True, packagers must not merge this group. Default False.",
