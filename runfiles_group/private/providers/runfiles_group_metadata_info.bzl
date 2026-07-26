@@ -14,12 +14,16 @@ load(":runfiles_group_entry_info.bzl", "KINDS")
 _DOC = """\
 Per-group metadata overrides, keyed by group name.
 
+Keys are group names in either form: a Label for a per-target group, a string for a
+named one (see `lib.entry()`).
+
 Each value is a *patch*: only the fields it actually carries are applied, and every
 other field of the group's entry is left untouched. Build one with
 `lib.group_metadata(...)`, passing just the fields you want to change:
 
     RunfilesGroupMetadataInfo(groups = {
         "some_ruleset#interpreter": lib.group_metadata(rank = -2000),
+        Label("//src:lib_a"): lib.group_metadata(do_not_merge = True),
     })
 
 Overridable fields:
@@ -124,8 +128,8 @@ RunfilesGroupMetadataInfo, _ = provider(
     init = _make_runfilesgroupmetadatainfo_init,
     fields = {
         "groups": """\
-A dict mapping group name (string) to a metadata patch struct carrying any subset of
-rank, do_not_merge, weight, kind, merge_affinity and executable_group.
+A dict mapping group name (a Label or a string) to a metadata patch struct carrying any
+subset of rank, do_not_merge, weight, kind, merge_affinity and executable_group.
 Fields a patch does not carry are left unchanged. Names matching no group are ignored.
 """,
     },

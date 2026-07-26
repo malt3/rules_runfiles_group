@@ -3,9 +3,19 @@ load("@rules_runfiles_group//runfiles_group:runfiles_group_analysis_test.bzl", "
 load("//consumer/rules:fake_package.bzl", "fake_package")
 load("//producer/rules:asset_bundle.bzl", "asset_bundle")
 load("//producer/rules:skip_interpreter.bzl", "skip_interpreter")
-load("//src:group_names.bzl", "IRS_F1040")
 load("//producer/rules:starlark_binary.bzl", "starlark_binary")
 load("//producer/rules:starlark_library.bzl", "starlark_library")
+load(
+    "//src:group_names.bzl",
+    "COLORS",
+    "FIZZBUZZ",
+    "IRS_F1040",
+    "LIMITS",
+    "MATHLIB",
+    "STRINGUTIL",
+    "TEMPLATES",
+    "UNITS",
+)
 
 package(default_visibility = ["//visibility:public"])
 
@@ -67,9 +77,10 @@ asset_bundle(
 
 # adder pulls in groups from two rulesets at the same rank: the Starlark
 # libraries (affinity "starlark") and the asset bundles (affinity
-# "asset_bundle"). Its data files (a.txt, b.txt) arrive as auto-generated
-# "data#" groups with no affinity (""). See the *_merged tests below for how
-# merge_affinity keeps each ruleset's groups together.
+# "asset_bundle"). Both name their per-target groups by Label, which is why they
+# can coexist without agreeing on a prefix. Its data files (a.txt, b.txt) arrive
+# as synthesized per-target groups with no affinity (""). See the *_merged tests
+# below for how merge_affinity keeps each ruleset's groups together.
 starlark_binary(
     name = "adder",
     src = "adder.star",
@@ -133,11 +144,11 @@ starlark_binary(
     data = ["//src/shell_app:greeter"],
 )
 
-# Two libraries listing the same data file. Each one synthesizes its own
-# "data#@@//src:shared.txt" entry, with its own runfiles object, so the binary's
-# entry depset contains that group name twice. Resolving folds the duplicates into
-# one group by unioning their runfiles -- if it resolved last-wins instead, a pair
-# of same-named groups with different contents would silently lose one side.
+# Two libraries listing the same data file. Each one synthesizes its own entry for
+# Label("//src:shared.txt"), with its own runfiles object, so the binary's entry
+# depset contains that group twice. Resolving folds the duplicates into one group
+# by unioning their runfiles -- if it resolved last-wins instead, a pair of
+# same-named groups with different contents would silently lose one side.
 #
 # srcs is empty on purpose: both libraries would otherwise need a source file each
 # just to avoid overlapping with one another.
@@ -159,6 +170,30 @@ starlark_binary(
         ":lib_shares_a",
         ":lib_shares_b",
     ],
+)
+
+# A binary whose groups mix both name forms at the same rank. inner_by_repo emits
+# *named* groups (one per repository), and mixed_forms takes it as a data dep
+# alongside a library, whose group is named by Label -- so a Label and a string
+# land in the same rank and the same merge bucket. Sorting or comparing them
+# directly is an error in Starlark, so this is what pins the form discriminator
+# in lib's sort keys: remove it and this target fails to analyze.
+starlark_binary(
+    name = "inner_by_repo",
+    src = "adder.star",
+    runfiles_grouping = "by_repo",
+    deps = [
+        ":lib_a",
+        ":lib_b",
+    ],
+)
+
+starlark_binary(
+    name = "mixed_forms",
+    src = "empty.star",
+    data = [":inner_by_repo"],
+    runfiles_grouping = "by_target",
+    deps = [":lib_a"],
 )
 
 fake_package(
@@ -197,6 +232,17 @@ runfiles_group_analysis_test(
     ],
 )
 
+# Both name forms at the same rank and in the same merge bucket. max_groups drives
+# the merge selection, whose tie-breaking also has to compare across the forms.
+runfiles_group_analysis_test(
+    name = "test_mixed_forms",
+    binaries = [":mixed_forms"],
+    check_disabled = False,
+    expected_executable_group = P + "entrypoint",
+    max_groups = 4,
+    overlapping_group_behavior = "ignore",
+)
+
 # The shared data file must end up in exactly one group, and the completeness and
 # overlap checks must both pass -- which they cannot if the fold duplicated or
 # dropped it.
@@ -208,9 +254,9 @@ runfiles_group_analysis_test(
     expected_group_names = [
         P + "interpreter",
         P + "std",
-        "data#@@//src:shared.txt",
-        P + "//src:lib_shares_a",
-        P + "//src:lib_shares_b",
+        "@@//src:lib_shares_a",
+        "@@//src:lib_shares_b",
+        "@@//src:shared.txt",
         P + "entrypoint",
     ],
     overlapping_group_behavior = "error",
@@ -220,7 +266,7 @@ runfiles_group_analysis_test(
 #
 # adder mixes three merge affinities at rank RANK_EXECUTABLE - 1:
 #   "asset_bundle": assets_docs(12), assets_ui(11)   (the other ruleset)
-#   ""            : data#a.txt(0), data#b.txt(0)     (data deps, no affinity)
+#   ""            : a.txt(0), b.txt(0)               (data deps, no affinity)
 #   "starlark"    : lib_a(10), lib_b(40)             (this ruleset)
 
 runfiles_group_analysis_test(
@@ -231,12 +277,12 @@ runfiles_group_analysis_test(
     expected_group_names = [
         P + "interpreter",
         P + "std",
-        "asset_bundle#assets_docs",
-        "asset_bundle#assets_ui",
-        "data#@@//src:a.txt",
-        "data#@@//src:b.txt",
-        P + "//src:lib_a",
-        P + "//src:lib_b",
+        "@@//src:a.txt",
+        "@@//src:assets_docs",
+        "@@//src:assets_ui",
+        "@@//src:b.txt",
+        "@@//src:lib_a",
+        "@@//src:lib_b",
         P + "entrypoint",
     ],
     overlapping_group_behavior = "error",
@@ -264,8 +310,8 @@ runfiles_group_analysis_test(
     expected_group_names = [
         P + "interpreter",
         P + "std",
-        P + "fizzbuzz",
-        P + "stringutil",
+        P + FIZZBUZZ,
+        P + STRINGUTIL,
         P + "_main",
     ],
     overlapping_group_behavior = "error",
@@ -277,7 +323,7 @@ runfiles_group_analysis_test(
 # cheaper cross-affinity pairs exist (e.g. the free data merge plus a
 # starlark/asset pair). merge_affinity consolidates each ruleset first:
 #   assets_ui(11)+assets_docs(12)   -> one "asset_bundle" group
-#   data#a.txt(0)+data#b.txt(0)     -> one "" group
+#   a.txt(0)+b.txt(0)               -> one "" group
 #   lib_a(10)+lib_b(40)             -> one "starlark" group
 runfiles_group_analysis_test(
     name = "test_adder_groups_merged",
@@ -287,9 +333,9 @@ runfiles_group_analysis_test(
     expected_group_names = [
         P + "interpreter",
         P + "std",
-        "asset_bundle#assets_ui+asset_bundle#assets_docs",
-        "data#@@//src:a.txt+data#@@//src:b.txt",
-        P + "//src:lib_a+//src:lib_b",
+        "@@//src:a.txt+@@//src:b.txt",
+        "@@//src:assets_ui+@@//src:assets_docs",
+        "@@//src:lib_a+@@//src:lib_b",
         P + "entrypoint",
     ],
     group_name_prefix = P,
@@ -307,8 +353,8 @@ runfiles_group_analysis_test(
     expected_group_names = [
         P + "interpreter",
         P + "std",
-        "data#@@//src:a.txt+data#@@//src:b.txt+asset_bundle#assets_ui+asset_bundle#assets_docs",
-        P + "//src:lib_a+//src:lib_b",
+        "@@//src:a.txt+@@//src:b.txt+@@//src:assets_ui+@@//src:assets_docs",
+        "@@//src:lib_a+@@//src:lib_b",
         P + "entrypoint",
     ],
     group_name_prefix = P,
@@ -342,7 +388,7 @@ runfiles_group_analysis_test(
     expected_group_names = [
         P + "interpreter",
         P + "std",
-        P + "fizzbuzz+stringutil",
+        P + FIZZBUZZ + "+" + STRINGUTIL,
         P + "_main",
     ],
     group_name_prefix = P,
@@ -371,11 +417,11 @@ runfiles_group_analysis_test(
     expected_group_names = [
         P + "interpreter",
         P + "std",
-        P + "colors",
-        P + "limits",
-        P + "mathlib",
-        P + "templates",
-        P + "units",
+        P + COLORS,
+        P + LIMITS,
+        P + MATHLIB,
+        P + TEMPLATES,
+        P + UNITS,
         P + "_main",
     ],
     overlapping_group_behavior = "error",
@@ -390,9 +436,9 @@ runfiles_group_analysis_test(
     expected_group_names = [
         P + "interpreter",
         P + "std",
-        P + "limits+units+colors",
-        P + "mathlib",
-        P + "templates",
+        P + LIMITS + "+" + UNITS + "+" + COLORS,
+        P + MATHLIB,
+        P + TEMPLATES,
         P + "_main",
     ],
     group_name_prefix = P,
@@ -408,8 +454,8 @@ runfiles_group_analysis_test(
     expected_group_names = [
         P + "interpreter",
         P + "std",
-        P + "limits+units+colors+mathlib",
-        P + "templates",
+        P + LIMITS + "+" + UNITS + "+" + COLORS + "+" + MATHLIB,
+        P + TEMPLATES,
         P + "_main",
     ],
     group_name_prefix = P,
@@ -425,7 +471,7 @@ runfiles_group_analysis_test(
     expected_group_names = [
         P + "interpreter",
         P + "std",
-        P + "limits+units+colors+mathlib+templates",
+        P + LIMITS + "+" + UNITS + "+" + COLORS + "+" + MATHLIB + "+" + TEMPLATES,
         P + "_main",
     ],
     group_name_prefix = P,
@@ -444,7 +490,7 @@ runfiles_group_analysis_test(
     expected_group_names = [
         P + "interpreter",
         P + "std",
-        P + "limits+units+colors+mathlib+templates",
+        P + LIMITS + "+" + UNITS + "+" + COLORS + "+" + MATHLIB + "+" + TEMPLATES,
         P + "_main",
     ],
     group_name_prefix = P,

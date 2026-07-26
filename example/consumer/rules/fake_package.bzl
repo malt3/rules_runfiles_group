@@ -46,14 +46,16 @@ def _fake_package_impl(ctx):
     # whole build. With Args, only the (already shared) nested sets are held and
     # the file is rendered at execution time.
     #
-    # before_each rather than format_each: group names are arbitrary strings and
-    # '%' is legal in a label, which would corrupt a format template.
+    # lib.name_str renders either name form: a per-target group's Label or a named
+    # group's string. before_each rather than format_each, because group names are
+    # arbitrary strings and '%' is legal in a label, which would corrupt a format
+    # template.
     args = ctx.actions.args()
     args.set_param_file_format("multiline")
     for entry in resolved.groups:
         args.add_all(
             entry.runfiles.files,
-            before_each = "{}\t{}".format(entry.kind, entry.name),
+            before_each = "{}\t{}".format(entry.kind, lib.name_str(entry.name)),
             map_each = _short_path,
             expand_directories = False,
         )
@@ -61,11 +63,12 @@ def _fake_package_impl(ctx):
     manifest = ctx.actions.declare_file(ctx.label.name + ".manifest")
     ctx.actions.write(manifest, args)
 
-    # The group carrying the executable is where a real packager would also put
-    # the launcher, the runfiles symlinks and the repo mapping manifest.
+    # Output group names have to be strings, so this is one of the places a
+    # packager canonicalizes. A real packager would also put the launcher, the
+    # runfiles symlinks and the repo mapping manifest into resolved.executable_group.
     output_groups = {}
     for entry in resolved.groups:
-        output_groups[entry.name] = entry.runfiles.files
+        output_groups[lib.name_str(entry.name)] = entry.runfiles.files
 
     return [
         DefaultInfo(files = depset([manifest])),

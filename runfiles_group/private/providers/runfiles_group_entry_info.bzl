@@ -45,9 +45,9 @@ has been validated.
 
 # Closed set of group kinds. "" means unspecified.
 #
-# `kind` is the protocol's stable, machine-readable selector. Group names are
-# ruleset-internal strings derived from target labels, so packager configuration
-# keyed on a name breaks the moment a target is renamed; `kind` does not.
+# `kind` is the protocol's stable, machine-readable selector. A group name is either
+# a Label or a ruleset-internal prefixed string, so packager configuration keyed on a
+# name breaks the moment a target is renamed; `kind` does not.
 #
 # It deliberately has no effect on ordering or merging -- that is what `rank` and
 # `merge_affinity` are for.
@@ -63,7 +63,13 @@ KINDS = [
 RunfilesGroupEntryInfo = provider(
     doc = "One runfiles group: a name, a runfiles object, and its ordering/merge metadata.",
     fields = {
-        "name": "str: the group name. Prefix it with something unique to your ruleset.",
+        "name": """\
+Label or str: the group's identity. A Label means a per-target group -- "the
+runfiles this one target contributes" -- and needs no prefix, because a Label is
+globally unique. A string means a named group that several targets contribute to;
+prefix those with something unique to your ruleset. lib.name_str() renders either
+form as a string.
+""",
         "runfiles": "runfiles: the contents of this group.",
         "kind": "str: one of KINDS. A stable selector for packagers. \"\" means unspecified.",
         "rank": "int: partial ordering key. Lower rank = earlier = more cacheable. Default 0.",

@@ -83,14 +83,14 @@ _RUNFILES_COMPONENTS = [
 ]
 
 def _join_group_names(lighter_name, _lighter_weight, heavier_name, _heavier_weight):
-    return lighter_name + "+" + heavier_name
+    return lib.name_str(lighter_name) + "+" + lib.name_str(heavier_name)
 
 def _make_join_group_names(prefix):
     def _join(lighter_name, _lighter_weight, heavier_name, _heavier_weight):
-        stripped = heavier_name
+        stripped = lib.name_str(heavier_name)
         if stripped.startswith(prefix):
             stripped = stripped[len(prefix):]
-        return lighter_name + "+" + stripped
+        return lib.name_str(lighter_name) + "+" + stripped
 
     return _join
 
@@ -126,15 +126,18 @@ def _test_one(ctx, binary_attr):
         first_owner = {}
         overlaps = {}  # (first owner, other group) -> [entries]
         for entry in resolved.groups:
+            # Canonicalized once per group so the diagnostics read the same
+            # whether a group is identified by a Label or by a name.
+            group = lib.name_str(entry.name)
             for item in get_depset(entry.runfiles).to_list():
                 sets.insert(all_grouped, item)
                 if not check_overlap:
                     continue
                 owner = first_owner.get(item)
                 if owner == None:
-                    first_owner[item] = entry.name
+                    first_owner[item] = group
                     continue
-                pair = (owner, entry.name)
+                pair = (owner, group)
                 if pair in overlaps:
                     overlaps[pair].append(item)
                 else:
@@ -193,7 +196,9 @@ def _test_one(ctx, binary_attr):
                 ),
             )
 
-    actual_names = [entry.name for entry in resolved.groups]
+    # Expectations are written as strings in BUILD files, so both name forms are
+    # compared in their canonical string form.
+    actual_names = [lib.name_str(entry.name) for entry in resolved.groups]
     if ctx.attr.expected_group_names:
         if actual_names != ctx.attr.expected_group_names:
             success = False
@@ -204,11 +209,12 @@ def _test_one(ctx, binary_attr):
                 _INDENT + str(actual_names),
             )
 
-    if ctx.attr.expected_executable_group and resolved.executable_group != ctx.attr.expected_executable_group:
+    actual_executable_group = lib.name_str(resolved.executable_group) if resolved.executable_group != None else None
+    if ctx.attr.expected_executable_group and actual_executable_group != ctx.attr.expected_executable_group:
         success = False
         issues.append("expected executable_group '{}' but got {}".format(
             ctx.attr.expected_executable_group,
-            repr(resolved.executable_group),
+            repr(actual_executable_group),
         ))
 
     return (success, issues)
@@ -317,12 +323,17 @@ small target that checks it. Must not be a select().
             doc = """\
 If set, the test verifies that the ordered group names (after optional merging and rank-based ordering)
 match this list exactly. Applies to all binaries in the test.
+
+Names are compared in canonical string form (lib.name_str), so a group named by a Label
+is written as its canonical label string, e.g. "@@//src:lib_a".
 """,
         ),
         "expected_executable_group": attr.string(
             doc = """\
 If set, the test verifies that RunfilesGroupInfo.executable_group (after optional
-merging) is exactly this group name. Applies to all binaries in the test.
+merging) is exactly this group name, in canonical string form (lib.name_str) -- so a
+group named by a Label is written as its canonical label string. Applies to all
+binaries in the test.
 """,
         ),
         "max_groups": attr.int(
@@ -342,6 +353,7 @@ to assert the actual reachable count. -1 means no check (the test fails if group
 If set, merged group names will strip this prefix from the second (heavier) group name
 before joining with '+'. This avoids repeating a common prefix in merged names.
 For example, with prefix "p#", merging "p#foo" and "p#bar" produces "p#foo+bar" instead of "p#foo+p#bar".
+Names are canonicalized first, so this also applies to groups named by a Label.
 """,
         ),
         "overlapping_group_behavior": attr.string(
