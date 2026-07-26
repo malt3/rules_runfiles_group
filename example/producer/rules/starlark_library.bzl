@@ -4,8 +4,11 @@ load("@rules_runfiles_group//runfiles_group:lib.bzl", "lib")
 load("@rules_runfiles_group//runfiles_group:providers.bzl", "RunfilesGroupInfo")
 load("//producer/providers:providers.bzl", "StarlarkInfo")
 
-_GROUP_PREFIX = "starlark_runfiles_group#"
-
+# This rule's group is per-target: it is named by ctx.label, so it needs no
+# ruleset name prefix -- a Label cannot collide with another ruleset's group.
+# Only starlark_binary produces *named* groups ("interpreter", "std", one per
+# repository), and those are the ones that carry a prefix.
+#
 # All groups produced by this ruleset share a single merge_affinity so that a
 # packager forced to merge prefers to keep Starlark groups together (and,
 # symmetrically, keeps other rulesets' groups together). Following the
@@ -64,7 +67,6 @@ def _starlark_library_impl(ctx):
     if not lib.is_enabled(ctx):
         return providers
 
-    group_name = _GROUP_PREFIX + loadpath + ":" + ctx.label.name
     own_weight = ctx.attr.runfiles_weight if ctx.attr.runfiles_weight > 0 else None
     own_affinity = ctx.attr.merge_affinity if ctx.attr.merge_affinity else _AFFINITY
 
@@ -81,7 +83,10 @@ def _starlark_library_impl(ctx):
         deps = ctx.attr.deps,
         data = ctx.attr.data,
         own = [lib.entry(
-            name = group_name,
+            # A per-target group: this library's own sources, and nothing else.
+            # ctx.label is already interned and globally unique, so it needs no
+            # ruleset prefix and costs nothing to name.
+            name = ctx.label,
             runfiles = own_runfiles,
             # A library in an external repository is third-party code as far as a
             # packager is concerned; one in this workspace is not.
@@ -91,7 +96,6 @@ def _starlark_library_impl(ctx):
         )],
     )))
     return providers
-
 
 starlark_library = rule(
     implementation = _starlark_library_impl,

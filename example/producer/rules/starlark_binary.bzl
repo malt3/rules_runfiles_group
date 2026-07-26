@@ -160,7 +160,10 @@ def _starlark_binary_impl(ctx):
         return providers
 
     if ctx.attr.runfiles_grouping != "disabled":
-        own_repo = ctx.attr.repository
+        # The canonical repository name, because that is what a group's Label
+        # reports. ctx.attr.repository is this ruleset's own friendly alias and
+        # only exists for the Starlark load path.
+        own_repo = ctx.label.repo_name
 
         # Both grouping modes re-shape the collected groups, so this binary is a
         # "materializing" target: it flattens the dependencies' entry depset once.
@@ -207,16 +210,21 @@ def _starlark_binary_impl(ctx):
                     entries.append(lib.derive(entry, rank = _dep_rank(entry.name, own_repo)))
 
         elif ctx.attr.runfiles_grouping == "by_repo":
-            # One group per repository. Members' weights are summed, and their
+            # One group per repository: a *named* group, because many targets
+            # contribute to each one. Members' weights are summed, and their
             # affinity and kind adopted, so the aggregate still carries usable
             # merge hints.
+            #
+            # Reading the repository off a per-target group is just
+            # entry.name.repo_name -- no string parsing, and no dependence on how
+            # another ruleset happens to spell its names.
             repo_runfiles = {own_repo: [entrypoint_runfiles]}
             repo_weights = {}
             repo_affinities = {}
             repo_kinds = {}
             if collected != None:
                 for entry in collected.groups:
-                    repo = _extract_repo(entry.name)
+                    repo = _entry_repo(entry.name)
                     repo_runfiles.setdefault(repo, []).append(entry.runfiles)
                     if entry.weight != None:
                         repo_weights[repo] = repo_weights.get(repo, 0) + entry.weight
@@ -228,7 +236,7 @@ def _starlark_binary_impl(ctx):
                     if entry.kind:
                         repo_kinds[repo] = entry.kind
 
-            executable_group = _GROUP_PREFIX + (own_repo or "_main")
+            executable_group = _GROUP_PREFIX + current_repo
             for repo, parts in repo_runfiles.items():
                 group_name = _GROUP_PREFIX + (repo or "_main")
                 merged = parts[0] if len(parts) == 1 else parts[0].merge_all(parts[1:])
@@ -258,26 +266,17 @@ def _starlark_binary_impl(ctx):
 
     return providers
 
-def _extract_repo(group_name):
-    """Extracts the friendly repo name from a group name.
+def _entry_repo(name):
+    """Canonical repository name a group belongs to, or "" for the main repository.
 
-    "starlark_runfiles_group#@fizzbuzz//:fizzbuzz" -> "fizzbuzz"
-    "starlark_runfiles_group#//src:lib_a" -> ""
-    "data#@@fizzbuzz//pkg:target" -> "fizzbuzz"
-    "data#@@//src:a.txt" -> ""
+    A per-target group knows its repository exactly: it is the Label's. A *named*
+    group belongs to no single repository -- it is the point of a named group that
+    several targets contribute to it -- so it lands in the main-repository bucket,
+    which is where this ruleset's own named groups belong anyway.
     """
-    if group_name.startswith(_GROUP_PREFIX):
-        group_name = group_name[len(_GROUP_PREFIX):]
-    elif group_name.startswith("data#"):
-        group_name = group_name[len("data#"):]
-    if group_name.startswith("@@"):
-        group_name = group_name[1:]
-    if not group_name.startswith("@"):
-        return ""
-    idx = group_name.find("//")
-    if idx < 0:
-        return ""
-    return group_name[1:idx]
+    if type(name) == "Label":
+        return name.repo_name
+    return ""
 
 def _dep_rank(name, own_repo):
     """Rank for a collected dep/data group in by_target grouping.
@@ -285,7 +284,7 @@ def _dep_rank(name, own_repo):
     First-party (own-repo) groups sit just below the executable; third-party
     groups anchor at the shared-deps rank.
     """
-    if _extract_repo(name) == own_repo:
+    if _entry_repo(name) == own_repo:
         return lib.RANK_EXECUTABLE - 1
     return lib.RANK_SHARED_DEPS
 

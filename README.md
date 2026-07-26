@@ -155,7 +155,7 @@ def _my_binary_impl(ctx):
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `name` | str | — | The group name. Prefix it with something unique to your ruleset — see [Naming groups](#naming-groups). |
+| `name` | Label or str | — | The group's identity: a `Label` for a per-target group, a prefixed string for a group many targets contribute to — see [Naming groups](#naming-groups). |
 | `runfiles` | runfiles | — | The group's contents. |
 | `kind` | str | `""` | One of `lib.KINDS`. A stable, machine-readable selector for packagers. Does **not** affect ordering or merging. |
 | `rank` | int | 0 | Partial ordering key. Lower rank = earlier in the output. Groups at different ranks are never merged together. |
@@ -178,7 +178,7 @@ def _asset_bundle_impl(ctx):
     # Reuse the same runfiles object DefaultInfo carries: the group then costs a
     # pointer rather than a second copy of the same nested sets.
     providers.append(RunfilesGroupInfo(entries = lib.entries([lib.entry(
-        name = "asset_bundle#" + ctx.label.name,
+        name = ctx.label,  # a per-target group: no prefix needed
         runfiles = runfiles,
         kind = "first_party",
         rank = lib.RANK_SHARED_DEPS,
@@ -199,7 +199,7 @@ providers.append(RunfilesGroupInfo(entries = lib.collect(
     deps = ctx.attr.deps,
     data = ctx.attr.data,
     own = [lib.entry(
-        name = "foo_runfiles_group#" + str(ctx.label),
+        name = ctx.label,
         runfiles = own_runfiles,
         kind = "first_party",
     )],
@@ -246,8 +246,8 @@ Within the same rank, the packager is free to order or merge groups as it sees f
 
 #### Classifying groups with `kind`
 
-`kind` is the protocol's stable selector. Group names are ruleset-internal strings,
-usually derived from target labels, so a packager configuration keyed on a group name
+`kind` is the protocol's stable selector. A group name is either a Label or a
+ruleset-internal prefixed string, so a packager configuration keyed on a group name
 breaks as soon as a target is renamed. `kind` does not, which makes it the right thing
 for a packager's user-facing "include these / exclude those / put these in that layer"
 options.
@@ -270,28 +270,56 @@ so other modules may deliberately reuse a value to opt into the same grouping �
 example, `rules_java` could be the affinity for all JVM-shaped groups, including those
 contributed by `rules_jvm_external`, Kotlin rules, and other Java-flavored rulesets.
 
-The empty string `""` means "no affinity". Auto-generated `data#<label>` groups (data
-deps that do not themselves provide `RunfilesGroupInfo`) are never assigned an affinity
+The empty string `""` means "no affinity". The per-target groups synthesized for data
+deps that do not themselves provide `RunfilesGroupInfo` are never assigned an affinity
 — they keep the empty affinity `""`.
 
 ### Naming groups
 
-Group names are arbitrary strings and live in a shared namespace across all `RunfilesGroupInfo` providers merged into the same binary. If two rulesets independently define a group called `"interpreter"` — say, one for Node.js and one for Python — those groups will be merged together, which may be undesirable.
+There are two kinds of group, and a group's name says which kind it is.
 
-To avoid this, **prefix all group names with a string unique to your ruleset**, separated by a delimiter like `#`:
+**One group per target** — "the runfiles this one target contributes". Name it with a
+**Label**: `ctx.label` for your own group, `dep.label` for a dependency's. A Label is
+globally unique, so there is no prefix to invent and no namespace to coordinate; two
+rulesets that both produce a per-target group cannot collide. It is also free — Bazel
+already interns every Label, so naming a group this way allocates nothing, where a
+string derived from the label allocates one per target.
 
 ```starlark
-lib.entry(name = "my_rules_runfiles_group#interpreter", runfiles = ...)
-lib.entry(name = "my_rules_runfiles_group#std", runfiles = ...)
-lib.entry(name = "my_rules_runfiles_group#" + loadpath + ":" + ctx.label.name, runfiles = ...)
+lib.entry(name = ctx.label, runfiles = own_runfiles, kind = "first_party")
 ```
 
-This ensures that `my_rules_runfiles_group#interpreter` and `other_rules_runfiles_group#interpreter` remain distinct, even when both rulesets contribute groups to the same binary target.
+**Many targets contributing to one group** — "interpreter", "std", "third_party",
+"one group per repository". Here no single target owns the group, so name it with a
+**string**. Strings share one namespace across every `RunfilesGroupInfo` merged into
+a binary, so **prefix them with something unique to your ruleset**, separated by a
+delimiter like `#`. Without that, one ruleset's `"interpreter"` and another's fold
+into a single group.
 
-When merging groups (e.g. in `lib.limit`), pass a custom `merged_group_name` callback that strips the prefix from the second group name before joining. This keeps merged names readable — `my_rules_runfiles_group#foo+bar` instead of `my_rules_runfiles_group#foo+my_rules_runfiles_group#bar`.
+```starlark
+lib.entry(name = "my_rules#interpreter", runfiles = ...)
+lib.entry(name = "my_rules#std", runfiles = ...)
+```
 
-Two entries with the *same* name are legal and are folded into one group by
-`lib.resolve()`: their runfiles are unioned, `rank` takes the minimum,
+Both forms are ordered, folded, merged and looked up the same way, and
+`resolved.by_name` is keyed by whichever form the producer used. Wherever you need a
+plain string — an artifact name, an `OutputGroupInfo` key, a manifest line, an error
+message — call `lib.name_str(entry)`; for a packager whose user-facing configuration
+names groups as strings, `lib.index_by_name_str(resolved)` gives you a
+`dict[str, entry]`.
+
+```starlark
+for entry in resolved.groups:
+    output_groups[lib.name_str(entry.name)] = entry.runfiles.files
+```
+
+When merging groups (e.g. in `lib.limit`), the `merged_group_name` callback receives
+the names in their original form and may return either. A merged group is rarely
+still one target's, so returning a string is the usual answer; use `lib.name_str()`
+on the inputs to build it.
+
+Two entries with the *same* name — either form — are legal and are folded into one
+group by `lib.resolve()`: their runfiles are unioned, `rank` takes the minimum,
 `do_not_merge` is or-ed, `weight` takes the maximum, and `kind` and `merge_affinity`
 take whichever is set. This is what makes a shared data dependency collapse to one
 group no matter how many targets reach it.
@@ -306,7 +334,7 @@ somewhere: the runfiles symlinks, the repo mapping manifest, and so on. Set
 ```starlark
 RunfilesGroupInfo(
     entries = lib.entries(entries),
-    executable_group = "foo_runfiles_group#app_code",
+    executable_group = "foo_runfiles_group#app_code",  # or a Label, for a per-target group
 )
 ```
 
@@ -326,7 +354,7 @@ are mandatory keywords, because handling `data` is the classic footgun here — 
 
 **`deps`** typically come from your own ruleset's `*_library` targets — they will likely provide `RunfilesGroupInfo`, so their entry depsets are referenced directly.
 
-**`data`** can be arbitrary targets. Some may provide `RunfilesGroupInfo` (e.g. a `*_binary` from a ruleset that supports it), while others won't. For targets without `RunfilesGroupInfo`, `lib.collect` synthesizes an entry named `data#<canonical label>` covering the dep's `DefaultInfo.files` and `DefaultInfo.default_runfiles`. Because the name is derived from the label, two parts of the dependency graph that share the same data dep produce the same group name, and `lib.resolve()` folds them back into one group. These auto-generated `data#` entries carry no `kind` and no `merge_affinity`: a data dep that does not itself provide `RunfilesGroupInfo` is never assigned one.
+**`data`** can be arbitrary targets. Some may provide `RunfilesGroupInfo` (e.g. a `*_binary` from a ruleset that supports it), while others won't. For targets without `RunfilesGroupInfo`, `lib.collect` synthesizes a per-target entry named by the dep's `Label`, covering its `DefaultInfo.files` and `DefaultInfo.default_runfiles`. Because the name *is* the label, two parts of the dependency graph that share the same data dep produce the same group, and `lib.resolve()` folds them back into one. These synthesized entries carry no `kind` and no `merge_affinity`: a data dep that does not itself provide `RunfilesGroupInfo` is never assigned one.
 
 Two things a `data` dep must not do, because `lib.collect` cannot work around either:
 
@@ -401,7 +429,7 @@ runfiles_group_analysis_test(
 It returns `struct(groups, by_name, executable_group)`:
 
 - `groups`: the entries, ordered.
-- `by_name`: `dict[str, entry]`.
+- `by_name`: `dict[Label|str, entry]`, keyed by whichever name form the producer used.
 - `executable_group`: a group name or `None`, guaranteed to be a key of `by_name`.
 
 Call it **once per consuming target**. It is the only place in the protocol that
@@ -431,20 +459,25 @@ if resolved.group_count > 5:
     fail("could not reduce to 5 groups")  # do_not_merge / rank constraints
 
 for entry in resolved.groups:
-    # entry.name, entry.kind, entry.rank, entry.weight, entry.merge_affinity
+    # entry.name is a Label (a per-target group) or a string (a named one);
+    # lib.name_str(entry) renders either. Also: entry.kind, entry.rank,
+    # entry.weight, entry.merge_affinity.
     # entry.runfiles: .files, .symlinks, .root_symlinks, .empty_filenames
     if entry.name == resolved.executable_group:
         # Add the executable, the runfiles symlinks and the repo mapping
         # manifest to this layer.
         ...
-    # Create a layer / archive entry / etc.
+    # Create a layer / archive entry / etc., named lib.name_str(entry).
     ...
 ```
 
 Ordering may not matter for some kinds of packages. In that case, it's advised to still resolve (so that hints are honored) but treat the order of `resolved.groups` as arbitrary.
 
-Key the parts of your API that users configure on `entry.kind`, not on `entry.name`:
-names are ruleset-internal and change when targets are renamed.
+Key the coarse parts of your API that users configure on `entry.kind` rather than on
+individual names. Where you do accept names — an "exclude this group" option, say —
+match them against `lib.index_by_name_str(resolved)`, so a user can write either
+`"@@//src:lib_a"` — a per-target group's canonical label string — or
+`"my_rules#interpreter"` for a named one.
 
 ### Respecting `aspect_hints`
 
@@ -463,8 +496,8 @@ action for the whole build. Use `ctx.actions.args()` with `add_all(..., map_each
 and hand the `Args` object to `ctx.actions.write`: only the (already shared) nested sets
 are held, and the file is rendered at execution time.
 
-Use `before_each` rather than `format_each` for the group name: group names are
-arbitrary strings and `%` is legal in a label, which would corrupt a format template.
+Render the name with `lib.name_str(entry.name)` first, then pass it as `before_each` —
+not `format_each`, because `%` is legal in a label and would corrupt a format template.
 
 ---
 

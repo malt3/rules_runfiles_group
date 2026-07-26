@@ -21,10 +21,10 @@ sh_binary(
     data = [
         "data/names.txt",
     ],
+    visibility = ["//visibility:public"],
     deps = [
-        "@rules_shell//shell/runfiles",
         ":config_lib",
         ":format_lib",
+        "@rules_shell//shell/runfiles",
     ],
-    visibility = ["//visibility:public"],
 )

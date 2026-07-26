@@ -1,5 +1,20 @@
 """Library for producing and consuming runfiles groups.
 
+GROUP NAMES come in two forms, because there are two kinds of group:
+
+    a Label   -- a PER-TARGET group: "the runfiles this one target contributes".
+                 Pass ctx.label for your own group, or dep.label for a dependency's.
+                 Globally unique, so it needs no ruleset prefix, and free: Bazel
+                 already interns the Label.
+    a string  -- a NAMED group that several targets contribute to: "interpreter",
+                 "std", "third_party". Strings share one namespace across every
+                 provider merged into a binary, so prefix them with something
+                 unique to your ruleset ("my_rules#interpreter").
+
+Both forms are ordered, folded, merged and looked up the same way. Use
+lib.name_str() wherever you need a plain string -- an artifact name, an output
+group key, a manifest line, an error message.
+
 PRODUCER SIDE -- O(1) allocations per target, never flattens anything:
 
     lib.entry(name, runfiles, kind, rank, do_not_merge, weight, merge_affinity)
@@ -11,8 +26,8 @@ PRODUCER SIDE -- O(1) allocations per target, never flattens anything:
     lib.collect(ctx, deps = , data = , own = )
         The whole entry depset for a target: its own entries plus its
         dependencies'. Dependencies that provide RunfilesGroupInfo contribute
-        their `entries` by reference; the others get one synthesized
-        "data#<label>" entry each.
+        their `entries` by reference; the others get one synthesized per-target
+        entry each, named by their Label.
     lib.entries(direct = , transitive = )
         An entry depset with the order the protocol requires, for producers that
         do not collect from dependencies.
@@ -29,13 +44,17 @@ CONSUMER SIDE -- flatten exactly ONCE per consuming target:
         carries no groups -- in which case the packager must fall back to
         DefaultInfo.default_runfiles as a single group.
           groups:           list of entries ordered by (rank, name)
-          by_name:          dict[str, entry]
-          executable_group: str or None, guaranteed to be a key of by_name
+          by_name:          dict[Label|str, entry]
+          executable_group: Label, str or None, guaranteed to be a key of by_name
     lib.resolved(groups, executable_group = )
         Builds a resolved value from a list of entries. This is what a transform
         returns.
+    lib.name_str(entry_or_name)
+        The canonical string form of a group name. Accepts an entry too.
     lib.group_names(resolved)
-        Sorted list of group names.
+        Sorted list of canonical name strings.
+    lib.index_by_name_str(resolved)
+        dict[str, entry], for configuration that names groups as strings.
     lib.limit(resolved, max_groups = , default_weight = , merged_group_name = )
         Merges groups until at most max_groups remain, respecting rank,
         do_not_merge, merge_affinity and weight. Returns a resolved value plus
@@ -91,14 +110,68 @@ _RANK_FOUNDATION = -1000
 _RANK_SHARED_DEPS = -100
 _RANK_EXECUTABLE = 0
 
-# A module-level string literal is interned by the parser, so it costs no extra
-# bytes per use.
-_DATA_PREFIX = "data#"
-
 # Bazel keeps one empty depset per order, process-wide.
 _NO_ENTRIES = depset()
 
 _ENTRY_FIELDS = ["name", "runfiles", "kind", "rank", "do_not_merge", "weight", "merge_affinity"]
+
+# ------------------------------------------------------------------ group names
+
+def _name_str(value):
+    """Canonical string form of a group name, for display and artifact naming.
+
+    Not injective by construction: nothing stops a producer from naming one group
+    with `Label("//p:t")` and another with the string `"@@//p:t"`. Anything that
+    *keys* on the result must therefore reject a collision rather than let one
+    group quietly overwrite another -- see lib.index_by_name_str and lib.limit.
+
+    Args:
+        value: A group name (a Label or a string), or an entry.
+
+    Returns:
+        str(label) for a per-target group, the name itself for a named one.
+    """
+
+    # Label is checked before the entry case on purpose: a Label has a `name`
+    # field of its own (the target name), so probing for `.name` first would
+    # quietly return "lib_a" instead of "//src:lib_a".
+    if type(value) == "Label":
+        return str(value)
+    if type(value) == "string":
+        return value
+    name = value.name
+    if type(name) == "Label":
+        return str(name)
+    return name
+
+def _check_name(where, name):
+    kind = type(name)
+    if kind == "Label":
+        return
+    if kind != "string" or not name:
+        fail("{}: name must be a Label or a non-empty string, got {}".format(where, repr(name)))
+
+def _sort_key(name):
+    """A comparison token for a group name that works across both forms.
+
+    A tuple comparison stops at the first unequal element, so putting the form
+    discriminator first means a Label is never compared against a string -- which
+    Starlark rejects outright. Per-target groups sort before named ones within a
+    rank; intra-rank order is unspecified by the protocol either way.
+    """
+    if type(name) == "Label":
+        return (0, name)
+    return (1, name)
+
+def _sorted_name_strs(names):
+    """Sorted string forms of a collection of group names, for diagnostics."""
+    return sorted([_name_str(name) for name in names])
+
+def _described_name(name):
+    """A group name rendered with its form, so a Label and a string never look alike."""
+    if type(name) == "Label":
+        return "Label({})".format(repr(_name_str(name)))
+    return repr(name)
 
 # ---------------------------------------------------------------- producer side
 
@@ -106,9 +179,17 @@ def _entry(*, name, runfiles, kind = "", rank = _RANK_EXECUTABLE, do_not_merge =
     """Creates one validated group entry.
 
     Args:
-        name: Group name (non-empty string). Prefix it with something unique to
-            your ruleset, e.g. "my_rules#interpreter"; names live in a namespace
-            shared by every provider merged into the same binary.
+        name: The group's identity, in one of two forms.
+
+            A **Label** for a per-target group -- "the runfiles this one target
+            contributes". Pass `ctx.label` for your own, or a dependency's
+            `dep.label`. A Label is globally unique, so it needs no ruleset prefix,
+            and it costs nothing: Bazel already interns it.
+
+            A **string** for a named group that several targets contribute to --
+            "interpreter", "std", "third_party". Strings live in a namespace shared
+            by every provider merged into the same binary, so prefix them with
+            something unique to your ruleset, e.g. "my_rules#interpreter".
         runfiles: A runfiles object holding this group's contents.
         kind: One of lib.KINDS. A stable selector for packagers, unaffected by
             renaming. Does not influence ordering or merging. Default "".
@@ -127,8 +208,8 @@ def _entry(*, name, runfiles, kind = "", rank = _RANK_EXECUTABLE, do_not_merge =
     # only weakly checked: every struct-like value has element type "struct", so a
     # malformed foreign entry would type-check and then fail inside somebody
     # else's consumer.
-    if type(name) != "string" or not name:
-        fail("lib.entry: name must be a non-empty string, got ", repr(name))
+    _check_name("lib.entry", name)
+
     if type(runfiles) != "runfiles":
         fail("lib.entry: runfiles must be a runfiles object, got ", type(runfiles))
     if kind not in KINDS:
@@ -196,9 +277,11 @@ def _entries(direct = [], transitive = []):
 def _data_entry(ctx, dep):
     """Synthesizes the entry for a dependency that provides no runfiles groups.
 
-    The name is derived from the dependency's label, so two targets that share a
-    data dependency synthesize the same group name and lib.resolve() folds them
-    back into one group.
+    It is a per-target group named by the dependency's Label, so two targets that
+    share a data dependency synthesize the same group and lib.resolve() folds them
+    back into one. Naming it with the Label rather than a string derived from it
+    means this costs nothing: Bazel already interns the Label and the dependency
+    already holds it.
 
     Args:
         ctx: The rule context.
@@ -232,7 +315,7 @@ def _data_entry(ctx, dep):
     # -- so it is a documented restriction on what may appear in `data`.
     if files:
         runfiles = ctx.runfiles(transitive_files = files).merge(runfiles)
-    return _entry(name = _DATA_PREFIX + str(dep.label), runfiles = runfiles)
+    return _entry(name = dep.label, runfiles = runfiles)
 
 def _collect(ctx, *, deps, data, own = []):
     """Returns the entry depset for a target: its own entries plus its dependencies'.
@@ -253,7 +336,7 @@ def _collect(ctx, *, deps, data, own = []):
         deps: Targets whose groups this target propagates -- typically the
             ruleset's own *_library targets, which provide RunfilesGroupInfo.
         data: Arbitrary targets. Those without RunfilesGroupInfo get one
-            synthesized "data#<canonical label>" entry each.
+            synthesized per-target entry each, named by their Label.
         own: Entries this target owns, built with lib.entry().
 
     Returns:
@@ -279,13 +362,16 @@ def _collect(ctx, *, deps, data, own = []):
             return transitive[0]
     return depset(direct, transitive = transitive)
 
-
 # ---------------------------------------------------------------- consumer side
 
 def _order_key(entry):
     # A module-level def, so sorted(key = _order_key) allocates no function value
-    # and no closure cell per call site.
-    return (entry.rank, entry.name)
+    # and no closure cell per call site. The name is wrapped in its form
+    # discriminator so a Label and a string are never compared against each other.
+    name = entry.name
+    if type(name) == "Label":
+        return (entry.rank, 0, name)
+    return (entry.rank, 1, name)
 
 def _make_resolved(by_name, executable_group):
     return struct(
@@ -298,8 +384,9 @@ def _check_entry(where, entry):
     for field in _ENTRY_FIELDS:
         if not hasattr(entry, field):
             fail("{}: entry is missing field '{}'; build entries with lib.entry() or lib.derive()".format(where, field))
+    _check_name(where, entry.name)
     if entry.kind not in KINDS:
-        fail("{}: entry '{}' has kind {}, expected one of {}".format(where, entry.name, repr(entry.kind), KINDS))
+        fail("{}: entry '{}' has kind {}, expected one of {}".format(where, _name_str(entry.name), repr(entry.kind), KINDS))
 
 def _resolved(groups, *, executable_group = None):
     """Builds a resolved group set from a list of entries, ordered by (rank, name).
@@ -308,8 +395,8 @@ def _resolved(groups, *, executable_group = None):
 
     Args:
         groups: List of entries. Names must be unique.
-        executable_group: Name of the group carrying the executable, or None. It
-            must name one of `groups`.
+        executable_group: The name (Label or string) of the group carrying the
+            executable, or None. It must name one of `groups`.
 
     Returns:
         struct(groups, by_name, executable_group).
@@ -318,13 +405,15 @@ def _resolved(groups, *, executable_group = None):
     for entry in groups:
         _check_entry("lib.resolved", entry)
         if entry.name in by_name:
-            fail("lib.resolved: duplicate group name '{}'".format(entry.name))
+            fail("lib.resolved: duplicate group name '{}'".format(_name_str(entry.name)))
         by_name[entry.name] = entry
-    if executable_group != None and executable_group not in by_name:
-        fail("lib.resolved: executable_group '{}' names no group. Present groups: {}".format(
-            executable_group,
-            sorted(by_name),
-        ))
+    if executable_group != None:
+        _check_name("lib.resolved: executable_group", executable_group)
+        if executable_group not in by_name:
+            fail("lib.resolved: executable_group {} names no group. Present groups: {}".format(
+                _described_name(executable_group),
+                _sorted_name_strs(by_name),
+            ))
     return _make_resolved(by_name, executable_group)
 
 def _fold(entries):
@@ -451,9 +540,9 @@ def _resolve(source, *, aspect_hints):
     if not by_name:
         return None
     if executable_group != None and executable_group not in by_name:
-        fail("lib.resolve: executable_group '{}' names no group in the entry depset. Present groups: {}".format(
-            executable_group,
-            sorted(by_name),
+        fail("lib.resolve: executable_group {} names no group in the entry depset. Present groups: {}".format(
+            _described_name(executable_group),
+            _sorted_name_strs(by_name),
         ))
 
     # Overrides are accumulated before the transforms run, so a transform sees the
@@ -483,8 +572,47 @@ def _resolve(source, *, aspect_hints):
     return resolved
 
 def _group_names(resolved):
-    """Returns the sorted group names of a resolved group set."""
-    return sorted(resolved.by_name)
+    """Returns the group names of a resolved group set, as sorted strings.
+
+    Args:
+        resolved: A resolved group set, from lib.resolve().
+
+    Returns:
+        A sorted list of canonical name strings. Use resolved.by_name if you need
+        the names in their original Label-or-string form.
+    """
+    return _sorted_name_strs(resolved.by_name)
+
+def _index_by_name_str(resolved):
+    """Indexes a resolved group set by canonical name string.
+
+    Useful for a packager whose user-facing configuration names groups as strings:
+    a user writes "@@//src:lib_a" (the canonical form of a per-target group's Label)
+    or "my_rules#interpreter", and this resolves either against the actual entries.
+
+    Args:
+        resolved: A resolved group set, from lib.resolve().
+
+    Returns:
+        dict[str, entry].
+    """
+    by_str = {}
+    for name, entry in resolved.by_name.items():
+        as_str = _name_str(name)
+
+        # A Label and the string form of that same label are two distinct groups
+        # that render identically. Returning a dict quietly missing one of them is
+        # how a packager loses a group's files.
+        if as_str in by_str:
+            fail(("lib.index_by_name_str: groups {} and {} both render as '{}'. Name one of " +
+                  "them differently -- a string that spells out a Label's canonical form is a " +
+                  "different group from the Label itself.").format(
+                _described_name(by_str[as_str].name),
+                _described_name(name),
+                as_str,
+            ))
+        by_str[as_str] = entry
+    return by_str
 
 # -------------------------------------------------------------- merge to limit
 
@@ -506,7 +634,7 @@ def _bucket_remove(buckets, key, name):
 def _affinity_key(entry):
     return (entry.rank, entry.merge_affinity)
 
-def _cheapest_pair(buckets, by_name, default_weight):
+def _cheapest_pair(buckets, by_name, sort_keys, default_weight):
     """Returns the cheapest mergeable pair as (lighter, heavier), or None.
 
     Cost is the combined effective weight of the two lightest groups in a bucket.
@@ -515,6 +643,11 @@ def _cheapest_pair(buckets, by_name, default_weight):
     The two lightest are found with a linear two-minimum scan rather than by
     sorting: this runs once per merge step, and sorting allocated a decorator, a
     key tuple and a Starlark frame per element per bucket per step.
+
+    Names are compared through `sort_keys`, which holds one form-discriminated
+    token per group, built once by the caller. Comparing the names directly would
+    fail as soon as a per-target (Label) group and a named (string) group land in
+    the same bucket.
     """
     best = None
     for _key, names in buckets.items():
@@ -522,29 +655,35 @@ def _cheapest_pair(buckets, by_name, default_weight):
             continue
         w1 = None
         n1 = None
+        k1 = None
         w2 = None
         n2 = None
+        k2 = None
         for name in names:
             entry = by_name.get(name)
             if entry == None:
                 continue  # merged away in an earlier step
             weight = _effective_weight(entry, default_weight)
-            if n1 == None or weight < w1 or (weight == w1 and name < n1):
+            key = sort_keys[name]
+            if n1 == None or weight < w1 or (weight == w1 and key < k1):
                 w2 = w1
                 n2 = n1
+                k2 = k1
                 w1 = weight
                 n1 = name
-            elif n2 == None or weight < w2 or (weight == w2 and name < n2):
+                k1 = key
+            elif n2 == None or weight < w2 or (weight == w2 and key < k2):
                 w2 = weight
                 n2 = name
+                k2 = key
         if n2 == None:
             continue
-        candidate = (w1 + w2, by_name[n1].rank, n1, n2)
-        if best == None or candidate < best:
-            best = candidate
+        candidate = (w1 + w2, by_name[n1].rank, k1, k2)
+        if best == None or candidate < best[0]:
+            best = (candidate, n1, n2)
     if best == None:
         return None
-    return (best[2], best[3])
+    return (best[1], best[2])
 
 def _limit(resolved, *, max_groups, default_weight = 0, merged_group_name = None):
     """Merges groups until at most max_groups remain.
@@ -558,8 +697,11 @@ def _limit(resolved, *, max_groups, default_weight = 0, merged_group_name = None
         max_groups: Maximum number of groups to leave.
         default_weight: Weight to assume for entries whose weight is None.
         merged_group_name: Optional function
-            (lighter_name, lighter_weight, heavier_name, heavier_weight) -> str
-            naming the merged group. If None, the heavier group's name is kept.
+            (lighter_name, lighter_weight, heavier_name, heavier_weight) -> name
+            naming the merged group. The names it receives are in their original
+            Label-or-string form; use lib.name_str() to render them. It may return
+            either form, though a merged group is rarely still one target's, so a
+            string is the usual answer. If None, the heavier group's name is kept.
 
     Returns:
         struct(groups, by_name, executable_group, group_count). The caller MUST
@@ -579,18 +721,33 @@ def _limit(resolved, *, max_groups, default_weight = 0, merged_group_name = None
     by_name = dict(resolved.by_name)
     executable_group = resolved.executable_group
 
+    # Canonical forms of the surviving names, so that a merged_group_name callback
+    # returning the string spelling of a Label-named group is caught. The raw
+    # `out_name in by_name` test below cannot see that: the two are different keys
+    # that render identically, and overwriting would drop a group's runfiles.
+    name_strs = {}
+    if merged_group_name != None:
+        for name in by_name:
+            name_strs[_name_str(name)] = name
+
     # Runfiles of a merged group are accumulated and merged with a single
     # merge_all() at the end. A pairwise fold would retain one two-slot array per
     # step and deepen the artifact DAG once per merge.
     parts = {}
 
     # Buckets are built once and patched incrementally: a merge only touches the
-    # two groups involved and their replacement.
+    # two groups involved and their replacement. sort_keys holds one comparison
+    # token per group so tie-breaking never compares a Label against a string.
     by_rank_affinity = {}
     by_rank = {}
+    sort_keys = {}
     for name, entry in by_name.items():
         if entry.do_not_merge:
+            # Never bucketed, so never compared: no sort key needed. It cannot
+            # become bucketed later either -- the only name added below is
+            # out_name, and a collision with an existing group already fails.
             continue
+        sort_keys[name] = _sort_key(name)
         _bucket_add(by_rank_affinity, _affinity_key(entry), name)
         _bucket_add(by_rank, entry.rank, name)
 
@@ -600,9 +757,9 @@ def _limit(resolved, *, max_groups, default_weight = 0, merged_group_name = None
 
         # Tier 1: prefer pairs sharing a (rank, merge_affinity).
         # Tier 2: fall back to the cheapest same-rank pair across affinities.
-        pair = _cheapest_pair(by_rank_affinity, by_name, default_weight)
+        pair = _cheapest_pair(by_rank_affinity, by_name, sort_keys, default_weight)
         if pair == None:
-            pair = _cheapest_pair(by_rank, by_name, default_weight)
+            pair = _cheapest_pair(by_rank, by_name, sort_keys, default_weight)
         if pair == None:
             break
 
@@ -618,16 +775,20 @@ def _limit(resolved, *, max_groups, default_weight = 0, merged_group_name = None
         heavy_weight = _effective_weight(heavy, default_weight)
         if merged_group_name != None:
             out_name = merged_group_name(lighter, light_weight, heavier, heavy_weight)
-            if type(out_name) != "string" or not out_name:
-                fail("lib.limit: merged_group_name must return a non-empty string, got ", repr(out_name))
+            if type(out_name) != "Label" and (type(out_name) != "string" or not out_name):
+                fail("lib.limit: merged_group_name must return a Label or a non-empty string, got ", repr(out_name))
 
             # Silently overwriting a third, untouched group would drop its
-            # runfiles and violate its do_not_merge.
-            if out_name in by_name:
-                fail("lib.limit: merged_group_name('{}', '{}') returned '{}', which is an existing group".format(
-                    lighter,
-                    heavier,
-                    out_name,
+            # runfiles and violate its do_not_merge. Compared in canonical form so
+            # that a string spelling of a Label-named group is caught too.
+            out_str = _name_str(out_name)
+            existing = name_strs.get(out_str)
+            if existing != None:
+                fail("lib.limit: merged_group_name({}, {}) returned {}, which is an existing group ({})".format(
+                    _described_name(lighter),
+                    _described_name(heavier),
+                    _described_name(out_name),
+                    _described_name(existing),
                 ))
         else:
             out_name = heavier
@@ -649,6 +810,11 @@ def _limit(resolved, *, max_groups, default_weight = 0, merged_group_name = None
             weight = light_weight + heavy_weight,
         )
         by_name[out_name] = merged
+        if merged_group_name != None:
+            name_strs.pop(_name_str(lighter), None)
+            name_strs.pop(_name_str(heavier), None)
+            name_strs[out_str] = out_name
+        sort_keys[out_name] = _sort_key(out_name)
         _bucket_add(by_rank_affinity, _affinity_key(merged), out_name)
         _bucket_add(by_rank, merged.rank, out_name)
         if executable_group == lighter or executable_group == heavier:
@@ -731,7 +897,9 @@ lib = struct(
     # consumer
     resolve = _resolve,
     resolved = _resolved,
+    name_str = _name_str,
     group_names = _group_names,
+    index_by_name_str = _index_by_name_str,
     limit = _limit,
     # metadata overrides (aspect_hints)
     group_metadata = group_metadata,
