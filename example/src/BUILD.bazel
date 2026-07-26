@@ -2,6 +2,7 @@ load("@bazel_skylib//rules:expand_template.bzl", "expand_template")
 load("@rules_runfiles_group//runfiles_group:runfiles_group_analysis_test.bzl", "runfiles_group_analysis_test")
 load("//consumer/rules:fake_package.bzl", "fake_package")
 load("//producer/rules:asset_bundle.bzl", "asset_bundle")
+load("//producer/rules:shared_bundle.bzl", "shared_bundle")
 load("//producer/rules:skip_interpreter.bzl", "skip_interpreter")
 load("//producer/rules:starlark_binary.bzl", "starlark_binary")
 load("//producer/rules:starlark_library.bzl", "starlark_library")
@@ -172,6 +173,36 @@ starlark_binary(
     ],
 )
 
+# Two targets contributing to ONE named group, handing over the two different
+# content forms: shared_docs_a gives lib the depset of File itself, shared_docs_b
+# gives it a runfiles object. That is the only way a fold has to union the forms
+# across producers, and lib.resolve() has to lift the depset side to do it -- which
+# is why it takes a ctx. If it dropped either side instead, the completeness check
+# below would fail with the missing file named.
+shared_bundle(
+    name = "shared_docs_a",
+    srcs = ["docs_a.txt"],
+    content_form = "files",
+    group_name = "example#shared_docs",
+)
+
+shared_bundle(
+    name = "shared_docs_b",
+    srcs = ["docs_b.txt"],
+    content_form = "runfiles",
+    group_name = "example#shared_docs",
+)
+
+starlark_binary(
+    name = "shared_group_demo",
+    src = "empty.star",
+    data = [
+        ":shared_docs_a",
+        ":shared_docs_b",
+    ],
+    runfiles_grouping = "by_target",
+)
+
 # A binary whose groups mix both name forms at the same rank. inner_by_repo emits
 # *named* groups (one per repository), and mixed_forms takes it as a data dep
 # alongside a library, whose group is named by Label -- so a Label and a string
@@ -257,6 +288,38 @@ runfiles_group_analysis_test(
         "@@//src:lib_shares_a",
         "@@//src:lib_shares_b",
         "@@//src:shared.txt",
+        P + "entrypoint",
+    ],
+    overlapping_group_behavior = "error",
+)
+
+# The contributors on their own, one per content form. Neither is a binary -- the
+# test only needs DefaultInfo and RunfilesGroupInfo -- so this is also the cheapest
+# place to check that a new producing rule honors the global switch, which is what
+# check_disabled verifies. A group handed over as a depset must report empty
+# symlinks, root symlinks and empty filenames, or the completeness check fails.
+runfiles_group_analysis_test(
+    name = "test_shared_bundle_forms",
+    binaries = [
+        ":shared_docs_a",
+        ":shared_docs_b",
+    ],
+    expected_group_names = ["example#shared_docs"],
+    overlapping_group_behavior = "error",
+)
+
+# The two contributors' files must both end up in the one shared group, which the
+# completeness check enforces: a fold that kept only one form's contents would leave
+# the other's file in default_runfiles and in no group at all.
+runfiles_group_analysis_test(
+    name = "test_shared_group_forms",
+    binaries = [":shared_group_demo"],
+    check_disabled = False,
+    expected_executable_group = P + "entrypoint",
+    expected_group_names = [
+        P + "interpreter",
+        P + "std",
+        "example#shared_docs",
         P + "entrypoint",
     ],
     overlapping_group_behavior = "error",
@@ -496,4 +559,15 @@ runfiles_group_analysis_test(
     group_name_prefix = P,
     max_groups = 3,
     overlapping_group_behavior = "error",
+)
+
+starlark_binary(
+    name = "ungrouped",
+    src = "empty.star",
+    runfiles_grouping = "disabled",
+)
+
+fake_package(
+    name = "ungrouped_pkg",
+    binary = ":ungrouped",
 )

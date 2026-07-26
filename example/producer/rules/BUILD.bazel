@@ -11,6 +11,16 @@ bzl_library(
 )
 
 bzl_library(
+    name = "shared_bundle",
+    srcs = ["shared_bundle.bzl"],
+    visibility = ["//visibility:public"],
+    deps = [
+        "@rules_runfiles_group//runfiles_group:lib",
+        "@rules_runfiles_group//runfiles_group:providers",
+    ],
+)
+
+bzl_library(
     name = "starlark_library",
     srcs = ["starlark_library.bzl"],
     visibility = ["//visibility:public"],

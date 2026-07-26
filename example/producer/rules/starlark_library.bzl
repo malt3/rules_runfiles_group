@@ -35,10 +35,12 @@ def _starlark_library_impl(ctx):
     else:
         loadpath = "//" + ctx.label.package
 
-    # Built once and used both as this library's own group value and as a
-    # component of default_runfiles. Allocating a second, identical runfiles
-    # object for the group would retain it for nothing.
-    own_runfiles = ctx.runfiles(files = direct_srcs)
+    # One depset for the two things that need this library's own sources: DefaultInfo
+    # and the group entry below. The group carries the depset itself rather than a
+    # runfiles object, because a Starlark library's group is only ever files -- no
+    # symlinks, no empty filenames -- and wrapping it would retain a runfiles object
+    # per library target that carries no information the depset does not.
+    own_files = depset(direct_srcs)
 
     # One merge_all instead of a per-dep fold. A fold retains one two-slot array
     # per step -- NestedSet.create stores a child's `children` array, not the
@@ -48,11 +50,12 @@ def _starlark_library_impl(ctx):
     to_merge.extend([dep[DefaultInfo].default_runfiles for dep in ctx.attr.data])
     if ctx.files.data:
         to_merge.append(ctx.runfiles(files = ctx.files.data))
+    own_runfiles = ctx.runfiles(transitive_files = own_files)
     runfiles = own_runfiles.merge_all(to_merge) if to_merge else own_runfiles
 
     providers = [
         DefaultInfo(
-            files = depset(direct_srcs),
+            files = own_files,
             runfiles = runfiles,
         ),
         StarlarkInfo(
@@ -87,7 +90,7 @@ def _starlark_library_impl(ctx):
             # ctx.label is already interned and globally unique, so it needs no
             # ruleset prefix and costs nothing to name.
             name = ctx.label,
-            runfiles = own_runfiles,
+            content = own_files,
             # A library in an external repository is third-party code as far as a
             # packager is concerned; one in this workspace is not.
             kind = "third_party" if ctx.attr.repository else "first_party",

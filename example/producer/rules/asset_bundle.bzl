@@ -26,11 +26,15 @@ def _asset_bundle_impl(ctx):
     if not lib.is_enabled(ctx):
         return providers
 
-    # A leaf: one per-target group of its own, nothing to collect. The runfiles
-    # object is the same one DefaultInfo carries, so the group costs a pointer.
+    # A leaf: one per-target group of its own, nothing to collect. The group keeps
+    # the runfiles form deliberately, even though its contents are only files:
+    # DefaultInfo retains this object anyway, so handing over a depset instead would
+    # save nothing here -- and it keeps a second content form in circulation, which
+    # is what exercises lib's mixed unions when a packager merges these groups with
+    # a starlark_library's files-only ones.
     providers.append(RunfilesGroupInfo(entries = lib.entries([lib.entry(
         name = ctx.label,
-        runfiles = runfiles,
+        content = runfiles,
         kind = "first_party",
         rank = lib.RANK_SHARED_DEPS,
         weight = ctx.attr.weight if ctx.attr.weight > 0 else None,

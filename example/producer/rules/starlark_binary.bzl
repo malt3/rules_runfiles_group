@@ -122,11 +122,13 @@ def _starlark_binary_impl(ctx):
 
     # Runfiles: interpreter + entrypoint + loadmap + stdlib + data + all deps.
     #
-    # The entrypoint bundle is built once and reused as the "entrypoint" group
-    # value below, so the two are the same object. The executable is already part
-    # of default_runfiles for an executable Starlark rule, so naming it here
-    # changes nothing about the contents.
-    entrypoint_runfiles = ctx.runfiles(files = [output, entrypoint, loadmap, properties])
+    # The entrypoint bundle is only files, so the "entrypoint" group below carries
+    # this depset itself and default_runfiles is built from the same depset: the two
+    # cannot drift apart, and no runfiles object is retained on the group's behalf.
+    # The executable is already part of default_runfiles for an executable Starlark
+    # rule, so naming it here changes nothing about the contents.
+    entrypoint_files = depset([output, entrypoint, loadmap, properties])
+    entrypoint_runfiles = ctx.runfiles(transitive_files = entrypoint_files)
 
     # The interpreter group's value and the interpreter's contribution to
     # default_runfiles must be the SAME object, or the group can end up holding
@@ -169,24 +171,26 @@ def _starlark_binary_impl(ctx):
         # "materializing" target: it flattens the dependencies' entry depset once.
         # A *_library must never do this -- it only ever calls lib.collect().
         collected = lib.resolve(
+            ctx,
             lib.collect(ctx, deps = ctx.attr.deps, data = ctx.attr.data),
             aspect_hints = [],
         )
 
         entries = [
-            # Special group: interpreter.
+            # Special group: interpreter. Keeps the runfiles form because it merges
+            # a dependency's default_runfiles, which may carry symlinks.
             lib.entry(
                 name = _GROUP_INTERPRETER,
-                runfiles = interpreter_runfiles,
+                content = interpreter_runfiles,
                 kind = "foundation",
                 rank = lib.RANK_FOUNDATION,
                 do_not_merge = True,
                 merge_affinity = _AFFINITY,
             ),
-            # Special group: std.
+            # Special group: std. Likewise -- these contents came from another rule.
             lib.entry(
                 name = _GROUP_STD,
-                runfiles = stdlib_info.default_runfiles,
+                content = stdlib_info.default_runfiles,
                 kind = "foundation",
                 rank = _RANK_STD,
                 merge_affinity = _AFFINITY,
@@ -196,11 +200,13 @@ def _starlark_binary_impl(ctx):
         if ctx.attr.runfiles_grouping == "by_target":
             # One group per transitive target, re-ranked relative to this binary.
             # lib.derive carries weight, merge_affinity and kind through, so
-            # re-ranking cannot silently reset them.
+            # re-ranking cannot silently reset them -- and it carries the contents
+            # through in whichever form the producer chose, so re-ranking a
+            # dependency's files-only group does not materialize anything.
             executable_group = _GROUP_ENTRYPOINT
             entries.append(lib.entry(
                 name = executable_group,
-                runfiles = entrypoint_runfiles,
+                content = entrypoint_files,
                 kind = "first_party",
                 rank = lib.RANK_EXECUTABLE,
                 merge_affinity = _AFFINITY,
@@ -218,14 +224,19 @@ def _starlark_binary_impl(ctx):
             # Reading the repository off a per-target group is just
             # entry.name.repo_name -- no string parsing, and no dependence on how
             # another ruleset happens to spell its names.
-            repo_runfiles = {own_repo: [entrypoint_runfiles]}
+            #
+            # entry.content is opaque here: it goes straight to lib.union(), which
+            # unions the two content forms and stays in the depset form when every
+            # part is one. A repository whose groups are all files-only therefore
+            # aggregates without building a runfiles object at all.
+            repo_contents = {own_repo: [entrypoint_files]}
             repo_weights = {}
             repo_affinities = {}
             repo_kinds = {}
             if collected != None:
                 for entry in collected.groups:
                     repo = _entry_repo(entry.name)
-                    repo_runfiles.setdefault(repo, []).append(entry.runfiles)
+                    repo_contents.setdefault(repo, []).append(entry.content)
                     if entry.weight != None:
                         repo_weights[repo] = repo_weights.get(repo, 0) + entry.weight
 
@@ -237,13 +248,13 @@ def _starlark_binary_impl(ctx):
                         repo_kinds[repo] = entry.kind
 
             executable_group = _GROUP_PREFIX + current_repo
-            for repo, parts in repo_runfiles.items():
+            for repo, parts in repo_contents.items():
                 group_name = _GROUP_PREFIX + (repo or "_main")
-                merged = parts[0] if len(parts) == 1 else parts[0].merge_all(parts[1:])
+                merged = lib.union(ctx, parts)
                 if repo == own_repo:
                     entries.append(lib.entry(
                         name = group_name,
-                        runfiles = merged,
+                        content = merged,
                         kind = "first_party",
                         rank = lib.RANK_EXECUTABLE,
                         weight = repo_weights.get(repo, None),
@@ -252,7 +263,7 @@ def _starlark_binary_impl(ctx):
                 else:
                     entries.append(lib.entry(
                         name = group_name,
-                        runfiles = merged,
+                        content = merged,
                         kind = repo_kinds.get(repo, ""),
                         rank = lib.RANK_SHARED_DEPS,
                         weight = repo_weights.get(repo, None),

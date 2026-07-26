@@ -29,15 +29,17 @@ def _fake_package_impl(ctx):
 
     # One call does the whole resolution protocol: flatten the entry depset once,
     # fold duplicate group names, apply the metadata overrides from the target and
-    # from the hints, run the hint transforms, order by (rank, name).
-    resolved = lib.resolve(binary, aspect_hints = hints)
+    # from the hints, run the hint transforms, order by (rank, name). The ctx is
+    # needed only if folding has to union a files-only group with a runfiles-form
+    # one.
+    resolved = lib.resolve(ctx, binary, aspect_hints = hints)
 
     if resolved == None:
         # Mandatory fallback: a binary that does not group its runfiles is
         # packaged as a single group.
         resolved = lib.resolved([lib.entry(
             name = "fake_package#default",
-            runfiles = binary[DefaultInfo].default_runfiles,
+            content = binary[DefaultInfo].default_runfiles,
         )])
 
     # Write the manifest from an Args object rather than a string built during
@@ -50,11 +52,16 @@ def _fake_package_impl(ctx):
     # group's string. before_each rather than format_each, because group names are
     # arbitrary strings and '%' is legal in a label, which would corrupt a format
     # template.
+    # lib.files() reads either content form, so this packager never has to know
+    # whether a producer handed over a runfiles object or a bare depset. A real
+    # packager that has to place a complete runfiles tree -- symlinks, empty files
+    # and all -- would call lib.runfiles(ctx, entry) instead, and would still not
+    # care which form it started from.
     args = ctx.actions.args()
     args.set_param_file_format("multiline")
     for entry in resolved.groups:
         args.add_all(
-            entry.runfiles.files,
+            lib.files(entry),
             before_each = "{}\t{}".format(entry.kind, lib.name_str(entry.name)),
             map_each = _short_path,
             expand_directories = False,
@@ -68,7 +75,7 @@ def _fake_package_impl(ctx):
     # runfiles symlinks and the repo mapping manifest into resolved.executable_group.
     output_groups = {}
     for entry in resolved.groups:
-        output_groups[lib.name_str(entry.name)] = entry.runfiles.files
+        output_groups[lib.name_str(entry.name)] = lib.files(entry)
 
     return [
         DefaultInfo(files = depset([manifest])),

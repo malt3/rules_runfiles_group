@@ -14,7 +14,9 @@ changes nothing should `return resolved` unchanged.
 
 It runs once per consuming target, after the entry depset has been flattened
 exactly once, so it is pure list and dict work: no depset is rebuilt and no
-provider is reconstructed.
+provider is reconstructed. A transform has no `ctx`, so it cannot build a runfiles
+object -- an entry it creates from scratch has to carry a depset of File, which is
+`lib.entry()`'s files-only content form.
 
     def _drop_docs(resolved):
         if not [e for e in resolved.groups if e.kind == "docs"]:
