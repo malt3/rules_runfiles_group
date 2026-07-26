@@ -328,6 +328,17 @@ are mandatory keywords, because handling `data` is the classic footgun here — 
 
 **`data`** can be arbitrary targets. Some may provide `RunfilesGroupInfo` (e.g. a `*_binary` from a ruleset that supports it), while others won't. For targets without `RunfilesGroupInfo`, `lib.collect` synthesizes an entry named `data#<canonical label>` covering the dep's `DefaultInfo.files` and `DefaultInfo.default_runfiles`. Because the name is derived from the label, two parts of the dependency graph that share the same data dep produce the same group name, and `lib.resolve()` folds them back into one group. These auto-generated `data#` entries carry no `kind` and no `merge_affinity`: a data dep that does not itself provide `RunfilesGroupInfo` is never assigned one.
 
+Two things a `data` dep must not do, because `lib.collect` cannot work around either:
+
+- Publish `DefaultInfo(files = depset(..., order = "topological"))` or `"preorder"`.
+  `ctx.runfiles(transitive_files = ...)` accepts only `"default"` and `"postorder"`, and
+  Starlark can neither read a depset's order back nor change it, so this fails analysis.
+- Rely on its executable being inside its own `default_runfiles`. Bazel merges the executable
+  in for Starlark rules, but a native one — a single-output `genrule`, for instance — publishes
+  an empty `default_runfiles` alongside a perfectly good `files_to_run.executable`. If your rule
+  puts a dependency's executable in a group, put the *same* runfiles object into
+  `default_runfiles`, rather than assuming the dependency already did.
+
 ### Group count limits
 
 Packaging rules may enforce a maximum group count via `lib.limit()`. For example, container image runtimes may limit the total number of layers an image can have. The merge algorithm respects `rank` (only merges within the same rank), `do_not_merge` (never merges protected groups), `merge_affinity` (prefers same-affinity partners), and `weight` (merges lightest groups first).
