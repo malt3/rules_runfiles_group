@@ -17,6 +17,13 @@ _AFFINITY = "starlark"
 # inside the metadata struct.
 _RANK_STD = lib.RANK_FOUNDATION + 100
 
+# Fixed group names, built once at load time rather than per target. A group name
+# is retained inside its entry, so concatenating a constant in the rule
+# implementation retains one copy of the same string per binary.
+_GROUP_INTERPRETER = _GROUP_PREFIX + "interpreter"
+_GROUP_STD = _GROUP_PREFIX + "std"
+_GROUP_ENTRYPOINT = _GROUP_PREFIX + "entrypoint"
+
 def _canonical_repo_name(ctx):
     return ctx.label.repo_name or "_main"
 
@@ -121,10 +128,19 @@ def _starlark_binary_impl(ctx):
     # changes nothing about the contents.
     entrypoint_runfiles = ctx.runfiles(files = [output, entrypoint, loadmap, properties])
 
+    # The interpreter group's value and the interpreter's contribution to
+    # default_runfiles must be the SAME object, or the group can end up holding
+    # files the binary's own runfiles never got. Do not assume a dependency's
+    # executable is already inside its default_runfiles: Bazel merges it in for
+    # Starlark rules, but a native one (a single-output genrule, say) publishes an
+    # empty default_runfiles next to a perfectly good files_to_run.executable.
+    interpreter_runfiles = ctx.runfiles(files = [interpreter_exe]).merge(interpreter_info.default_runfiles)
+    stdlib_info = stdlib[DefaultInfo]
+
     # One merge_all rather than a fold: see the comment in starlark_library.bzl.
     to_merge = [
-        interpreter_info.default_runfiles,
-        stdlib[DefaultInfo].default_runfiles,
+        interpreter_runfiles,
+        stdlib_info.default_runfiles,
     ]
     if ctx.files.data:
         to_merge.append(ctx.runfiles(files = ctx.files.data))
@@ -157,8 +173,8 @@ def _starlark_binary_impl(ctx):
         entries = [
             # Special group: interpreter.
             lib.entry(
-                name = _GROUP_PREFIX + "interpreter",
-                runfiles = ctx.runfiles(files = [interpreter_exe]).merge(interpreter_info.default_runfiles),
+                name = _GROUP_INTERPRETER,
+                runfiles = interpreter_runfiles,
                 kind = "foundation",
                 rank = lib.RANK_FOUNDATION,
                 do_not_merge = True,
@@ -166,8 +182,8 @@ def _starlark_binary_impl(ctx):
             ),
             # Special group: std.
             lib.entry(
-                name = _GROUP_PREFIX + "std",
-                runfiles = stdlib[DefaultInfo].default_runfiles,
+                name = _GROUP_STD,
+                runfiles = stdlib_info.default_runfiles,
                 kind = "foundation",
                 rank = _RANK_STD,
                 merge_affinity = _AFFINITY,
@@ -178,7 +194,7 @@ def _starlark_binary_impl(ctx):
             # One group per transitive target, re-ranked relative to this binary.
             # lib.derive carries weight, merge_affinity and kind through, so
             # re-ranking cannot silently reset them.
-            executable_group = _GROUP_PREFIX + "entrypoint"
+            executable_group = _GROUP_ENTRYPOINT
             entries.append(lib.entry(
                 name = executable_group,
                 runfiles = entrypoint_runfiles,

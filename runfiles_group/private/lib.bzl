@@ -214,7 +214,10 @@ def _data_entry(ctx, dep):
     default_info = dep[DefaultInfo]
     runfiles = default_info.default_runfiles
 
-    # default_runfiles is None for a rule that set only data_runfiles.
+    # default_runfiles is declared nullable on the Starlark API surface, and
+    # RunfilesProvider's factories accept null unchecked. No path through
+    # dep[DefaultInfo] appears to produce None today, so this branch costs one
+    # comparison and never runs -- keep it rather than depend on that.
     if runfiles == None:
         runfiles = ctx.runfiles()
     files = default_info.files
@@ -222,6 +225,11 @@ def _data_entry(ctx, dep):
     # Truth-testing a depset is O(1). Skipping the wrapper for a dependency that
     # contributes no files avoids a runfiles object and a nested set per
     # (target, data dep) edge, retained for the life of the provider.
+    #
+    # A dep whose DefaultInfo.files is topological- or preorder-ordered fails here:
+    # ctx.runfiles(transitive_files = ...) only accepts default and postorder. That
+    # is unfixable from Starlark -- a depset's order cannot be read back or changed
+    # -- so it is a documented restriction on what may appear in `data`.
     if files:
         runfiles = ctx.runfiles(transitive_files = files).merge(runfiles)
     return _entry(name = _DATA_PREFIX + str(dep.label), runfiles = runfiles)
@@ -382,7 +390,7 @@ def _combine_str(a, b):
         return a
     return min(a, b)
 
-def _apply_overlay(by_name, executable_group, metadata_info, where):
+def _apply_overlay(by_name, executable_group, metadata_info):
     """Applies one RunfilesGroupMetadataInfo. Fields a patch omits stay unchanged."""
     for name, patch in metadata_info.groups.items():
         entry = by_name.get(name)
@@ -452,10 +460,10 @@ def _resolve(source, *, aspect_hints):
     # overridden metadata. The target's own overrides come first, then the hints in
     # order, per-key last-wins.
     if type(source) == "Target" and RunfilesGroupMetadataInfo in source:
-        executable_group = _apply_overlay(by_name, executable_group, source[RunfilesGroupMetadataInfo], str(source.label))
+        executable_group = _apply_overlay(by_name, executable_group, source[RunfilesGroupMetadataInfo])
     for hint in aspect_hints:
         if RunfilesGroupMetadataInfo in hint:
-            executable_group = _apply_overlay(by_name, executable_group, hint[RunfilesGroupMetadataInfo], str(hint.label))
+            executable_group = _apply_overlay(by_name, executable_group, hint[RunfilesGroupMetadataInfo])
 
     resolved = _make_resolved(by_name, executable_group)
 
