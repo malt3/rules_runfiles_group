@@ -26,11 +26,14 @@ PRODUCER SIDE -- O(1) allocations per target, never flattens anything:
         A copy of an entry with some fields changed. Use this instead of
         re-listing every field, which is how a re-ranking producer or a renaming
         transform silently resets the fields it forgot.
-    lib.collect(ctx, deps = , data = , own = )
+    lib.collect(ctx, deps = , data = , own = , transitive = )
         The whole entry depset for a target: its own entries plus its
-        dependencies'. Dependencies that provide RunfilesGroupInfo contribute
-        their `entries` by reference; the others get one synthesized per-target
-        entry each, named by their Label.
+        dependencies'. `deps` and `data` are each an iterable of ctx.attr values,
+        so a rule with several Label-typed attributes passes them all in one
+        call. Dependencies that provide RunfilesGroupInfo contribute their
+        `entries` by reference; a `data` dependency that does not gets one
+        synthesized per-target entry, named by its Label, while a `deps`
+        dependency that does not contributes nothing.
     lib.entries(direct = , transitive = )
         An entry depset with the order the protocol requires, for producers that
         do not collect from dependencies.
@@ -135,6 +138,9 @@ _INT_TYPE = type(0)
 _BOOL_TYPE = type(False)
 _TARGET_TYPE = "Target"
 _STRUCT_TYPE = type(struct())
+_LIST_TYPE = type([])
+_TUPLE_TYPE = type(())
+_DICT_TYPE = type({})
 
 _ENTRY_FIELDS = ["name", "content", "kind", "rank", "do_not_merge", "weight", "merge_affinity"]
 
@@ -423,6 +429,75 @@ def _entries(direct = [], transitive = []):
     # rulesets. Traversal order is never observable: lib.resolve() sorts.
     return depset(direct, transitive = transitive)
 
+def _attr_targets(where, attrs):
+    """Flattens an iterable of rule attribute values to the Targets inside them.
+
+    Every Label-typed attribute kind hands ctx.attr a differently shaped value,
+    and a Target can sit at any of three depths:
+
+        attr.label                    Target
+        attr.label_list               list of Target
+        attr.label_keyed_string_dict  dict Target -> string
+        attr.string_keyed_label_dict  dict string -> Target
+        attr.label_list_dict          dict string -> list of Target
+
+    Which side of a keyed dict holds the Targets depends on the kind, so both are
+    inspected and the string side is skipped rather than rejected. That is also
+    why the dict kinds cannot be told apart from each other here -- and need not
+    be: what a caller wants from any of them is the Targets.
+
+    Starlark has no recursion, and this needs none: those five are the whole set,
+    and Bazel cannot add a deeper shape without adding an attribute kind.
+
+    Args:
+        where: Call-site description for error messages.
+        attrs: Iterable of ctx.attr values.
+
+    Returns:
+        A flat list of Targets. One short-lived list per call, and no copy of
+        anything a Target holds.
+    """
+    targets = []
+    for value in attrs:
+        kind = type(value)
+        if kind == _TARGET_TYPE:
+            targets.append(value)
+        elif kind == _LIST_TYPE or kind == _TUPLE_TYPE:
+            _append_targets(where, targets, value)
+        elif kind == _DICT_TYPE:
+            for key, item in value.items():
+                _append_dict_half(where, targets, key)
+                _append_dict_half(where, targets, item)
+        else:
+            fail(("{}: expected a Target, a list of Targets or a dict from a Label-typed " +
+                  "attribute, got {}. Pass each attribute value as one element, e.g. " +
+                  "[ctx.attr.deps, ctx.attr.exports].").format(where, kind))
+    return targets
+
+def _append_targets(where, targets, values):
+    """Appends a list of Targets, rejecting anything else."""
+    for value in values:
+        if type(value) != _TARGET_TYPE:
+            fail(("{}: expected a Target, got {}. Pass ctx.attr values, not ctx.files " +
+                  "values or plain Labels.").format(where, type(value)))
+        targets.append(value)
+
+def _append_dict_half(where, targets, value):
+    """Appends the Targets on one side of a dict-shaped attribute value.
+
+    The string side of a keyed dict is skipped: it is the key of a
+    string_keyed_label_dict or a label_list_dict, or the value of a
+    label_keyed_string_dict, and none of those name a dependency.
+    """
+    kind = type(value)
+    if kind == _TARGET_TYPE:
+        targets.append(value)
+    elif kind == _LIST_TYPE or kind == _TUPLE_TYPE:
+        _append_targets(where, targets, value)
+    elif kind != _STRING_TYPE:
+        fail(("{}: expected a Target, a list of Targets or a string in a dict-shaped " +
+              "attribute value, got {}.").format(where, kind))
+
 def _data_entry(ctx, dep):
     """Synthesizes the entry for a dependency that provides no runfiles groups.
 
@@ -474,10 +549,46 @@ def _data_entry(ctx, dep):
         runfiles = ctx.runfiles(transitive_files = depset(transitive = [files])).merge(runfiles)
     return _entry(name = dep.label, content = runfiles)
 
-def _collect(ctx, *, deps, data, own = []):
+def _collect(ctx, *, deps, data, own = [], transitive = []):
     """Returns the entry depset for a target: its own entries plus its dependencies'.
 
     O(number of direct dependencies); never flattens anything.
+
+    `deps` and `data` are each an iterable of *attribute values*, not one
+    attribute, so a rule with several Label-typed attributes needs one call:
+
+        lib.collect(
+            ctx,
+            deps = [ctx.attr.deps, ctx.attr.exports],
+            data = [ctx.attr.data, ctx.attr.tools],
+        )
+
+    Every Label-typed attribute kind is accepted and every Target in one
+    contributes: attr.label, attr.label_list, attr.label_keyed_string_dict,
+    attr.string_keyed_label_dict and attr.label_list_dict. The string side of a
+    keyed dict is skipped. A rule with a single label_list can still pass
+    `deps = ctx.attr.deps` unwrapped: a list of Targets is itself an iterable of
+    legal elements.
+
+    `deps` and `data` are handled differently, which is the whole reason there are
+    two of them:
+
+        deps    propagates RunfilesGroupInfo, and contributes nothing at all for a
+                dependency that has none. These are the ruleset's own targets, so
+                they are expected to speak the protocol: synthesizing a group for
+                one that does not would hide the bug, and it would claim that
+                dependency's whole DefaultInfo -- for a *_library, its entire
+                closure's runfiles, which overlaps the groups of everything else
+                that closure reaches.
+        data    falls back to a synthesized per-target entry (lib.data_entry())
+                for a dependency without RunfilesGroupInfo. These are arbitrary
+                user-supplied targets, usually leaves, and not participating is
+                the norm rather than a bug -- nothing else in the build is going
+                to group them.
+
+    So a dependency that both lacks RunfilesGroupInfo *and* contributes to this
+    target's default_runfiles must reach `data`, not `deps`, or a packager will
+    place no group holding its files.
 
     `deps` and `data` are mandatory because handling `data` is the protocol's
     classic footgun: pass `data = []` explicitly if your rule has none.
@@ -486,29 +597,45 @@ def _collect(ctx, *, deps, data, own = []):
     another depset. A depset's depth grows by one per nesting level and Bazel
     rejects depsets deeper than --nested_set_depth_limit (3500 by default), so a
     long dependency chain has half as much headroom if every level adds two
-    levels instead of one.
+    levels instead of one. `transitive` is there for the same reason: entry
+    depsets from somewhere other than an attribute -- a toolchain, an aspect's
+    accumulator -- belong in the same single depset, not in a wrapper around it.
 
     Args:
         ctx: The rule context.
-        deps: Targets whose groups this target propagates -- typically the
-            ruleset's own *_library targets, which provide RunfilesGroupInfo.
-        data: Arbitrary targets. Those without RunfilesGroupInfo get one
-            synthesized per-target entry each, named by their Label.
+        deps: Iterable of attribute values whose targets' groups this target
+            propagates -- typically the ruleset's own *_library targets, which
+            provide RunfilesGroupInfo.
+        data: Iterable of attribute values holding arbitrary targets. Those
+            without RunfilesGroupInfo get one synthesized per-target entry each,
+            named by their Label.
         own: Entries this target owns, built with lib.entry().
+        transitive: Entry depsets to merge in, e.g. from a toolchain.
 
     Returns:
         A depset of entries.
     """
     direct = list(own)
-    transitive = []
-    for dep_list in (deps, data):
-        for dep in dep_list:
-            if RunfilesGroupInfo in dep:
-                # By reference: depset(transitive = [x]) with nothing new returns
-                # x's own depset object, so propagation allocates nothing.
-                transitive.append(dep[RunfilesGroupInfo].entries)
-            else:
-                direct.append(_data_entry(ctx, dep))
+
+    # Checked here because the single-depset shortcut at the bottom returns an
+    # element of this list unchanged, so it is the one path that never reaches
+    # depset(transitive = ), which would have rejected a non-depset itself.
+    for entries in transitive:
+        if type(entries) != _DEPSET_TYPE:
+            fail("lib.collect: transitive must hold entry depsets, got {}".format(type(entries)))
+    transitive = list(transitive)
+
+    for dep in _attr_targets("lib.collect: deps", deps):
+        if RunfilesGroupInfo in dep:
+            # By reference: depset(transitive = [x]) with nothing new returns
+            # x's own depset object, so propagation allocates nothing.
+            transitive.append(dep[RunfilesGroupInfo].entries)
+
+    for dep in _attr_targets("lib.collect: data", data):
+        if RunfilesGroupInfo in dep:
+            transitive.append(dep[RunfilesGroupInfo].entries)
+        else:
+            direct.append(_data_entry(ctx, dep))
 
     # executable_group lives on RunfilesGroupInfo, not on entries, and is never
     # propagated -- so nothing has to be stripped from a dependency's groups.
