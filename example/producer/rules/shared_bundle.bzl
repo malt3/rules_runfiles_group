@@ -8,11 +8,12 @@ and it covers it with both content forms on purpose.
 Contributors to a shared group do not have to agree on a form, and cannot be made
 to: a rule whose group is only files hands over the depset it already has, while a
 rule that passes on another target's runfiles has no choice but the runfiles object.
-`lib.resolve()` folds the two into one group, which is the only place in the
-protocol that has to union the forms across producers rather than within one.
+`runfiles_groups.resolve()` folds the two into one group, which is the only place
+in the protocol that has to union the forms across producers rather than within
+one.
 """
 
-load("@rules_runfiles_group//runfiles_group:lib.bzl", "lib")
+load("@rules_runfiles_group//runfiles_group:lib.bzl", "runfiles_groups")
 load("@rules_runfiles_group//runfiles_group:providers.bzl", "RunfilesGroupInfo")
 
 _AFFINITY = "shared_bundle"
@@ -28,10 +29,10 @@ def _shared_bundle_impl(ctx):
     ]
 
     # Honor the global on/off switch: emit no RunfilesGroupInfo when disabled.
-    if not lib.is_enabled(ctx):
+    if not runfiles_groups.is_enabled(ctx):
         return providers
 
-    providers.append(RunfilesGroupInfo(entries = lib.entries([lib.entry(
+    providers.append(RunfilesGroupInfo(entries = runfiles_groups.entries([runfiles_groups.entry(
         # A *named* group, so it needs a ruleset prefix: unlike a Label, a string
         # shares one namespace with every other provider merged into a binary.
         name = ctx.attr.group_name,
@@ -56,8 +57,9 @@ shared_bundle = rule(
             default = "files",
             values = ["files", "runfiles"],
             doc = """\
-Which of lib.entry()'s two content forms to hand over: the depset of File itself
-("files", what a files-only group should do) or a runfiles object wrapping it
+Which of runfiles_groups.entry()'s two content forms to hand over: the depset of
+File itself ("files", what a files-only group should do) or a runfiles object
+wrapping it
 ("runfiles", what a group that carries symlinks or empty filenames has to do).
 
 A real rule has no reason to make this configurable -- it knows which of the two it
@@ -65,5 +67,5 @@ is. It exists here so one example binary can be reached by both forms of the sam
 group.
 """,
         ),
-    }, **lib.RULE_ATTRS),
+    }, **runfiles_groups.RULE_ATTRS),
 )

@@ -10,22 +10,23 @@ has to say something different:
     pinned_versions   attr.label_keyed_string_dict  library -> pinned version
     optional_features attr.label_list_dict          feature name -> libraries
 
-All five are *dependency* attributes, so all five go into `lib.collect(deps = )`,
-which takes an iterable of ctx.attr values and finds the Targets in each of them
-whatever shape it has. The ids, versions and feature names are not decoration:
+All five are *dependency* attributes, so all five go into
+`runfiles_groups.collect(deps = )`, which takes an iterable of ctx.attr values and
+finds the Targets in each of them whatever shape it has. The ids, versions and feature names are not decoration:
 they are written into the app's registry manifest, which is what makes the dict
 kinds the right shape rather than a demonstration of them.
 
-`data` is the other half of lib.collect() and is handled differently: a data
-target without RunfilesGroupInfo gets an entry synthesized for it, where a `deps`
-target without one contributes nothing. See lib.collect()'s documentation.
+`data` is the other half of runfiles_groups.collect() and is handled differently:
+a data target without RunfilesGroupInfo gets an entry synthesized for it, where a
+`deps` target without one contributes nothing. See the documentation of
+runfiles_groups.collect().
 
 attr.label_list_dict is Bazel 9 and newer. On older versions the rule drops
 `optional_features` (see _EXTRA_ATTRS below) rather than lose the rest of the
 demonstration.
 """
 
-load("@rules_runfiles_group//runfiles_group:lib.bzl", "lib")
+load("@rules_runfiles_group//runfiles_group:lib.bzl", "runfiles_groups")
 load("@rules_runfiles_group//runfiles_group:providers.bzl", "RunfilesGroupInfo")
 load("//producer/providers:providers.bzl", "StarlarkInfo")
 
@@ -53,9 +54,9 @@ def _starlark_app_impl(ctx):
     optional_features = getattr(ctx.attr, "optional_features", {})
 
     # Every dependency attribute, in the shape ctx.attr hands it over. This is the
-    # list lib.collect() walks: one element per attribute, and it finds the Targets
-    # inside each -- the Target itself, a list of them, or whichever side of a dict
-    # carries them.
+    # list runfiles_groups.collect() walks: one element per attribute, and it finds
+    # the Targets inside each -- the Target itself, a list of them, or whichever side
+    # of a dict carries them.
     dep_attrs = [
         ctx.attr.main,
         ctx.attr.deps,
@@ -113,17 +114,17 @@ def _starlark_app_impl(ctx):
     ]
 
     # Honor the global on/off switch: emit no RunfilesGroupInfo when disabled.
-    if not lib.is_enabled(ctx):
+    if not runfiles_groups.is_enabled(ctx):
         return providers
 
     # One call for all five dependency attributes plus data. A library reached
     # through two of them -- a plugin that is also a plain dep, say -- propagates
     # the same entry depset twice, and lib folds the duplicate group back into one.
-    providers.append(RunfilesGroupInfo(entries = lib.collect(
+    providers.append(RunfilesGroupInfo(entries = runfiles_groups.collect(
         ctx,
         deps = dep_attrs,
         data = [ctx.attr.data],
-        own = [lib.entry(
+        own = [runfiles_groups.entry(
             name = ctx.label,
             content = own_files,
             kind = "first_party",
@@ -156,7 +157,7 @@ _starlark_app = rule(
             allow_files = True,
             doc = "Data files available at runtime.",
         ),
-    }, **dict(_EXTRA_ATTRS, **lib.RULE_ATTRS)),
+    }, **dict(_EXTRA_ATTRS, **runfiles_groups.RULE_ATTRS)),
 )
 
 def starlark_app(name, optional_features = None, **kwargs):

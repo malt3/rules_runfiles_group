@@ -22,7 +22,7 @@ runfiles_group_analysis_test(
 """
 
 load("@bazel_skylib//lib:sets.bzl", "sets")
-load("//runfiles_group/private:lib.bzl", "lib")
+load("//runfiles_group/private:lib.bzl", "runfiles_groups")
 load("//runfiles_group/private/providers:runfiles_group_info.bzl", "RunfilesGroupInfo")
 
 _INDENT = "    "
@@ -82,14 +82,14 @@ _RUNFILES_COMPONENTS = [
 ]
 
 def _join_group_names(lighter_name, _lighter_weight, heavier_name, _heavier_weight):
-    return lib.name_str(lighter_name) + "+" + lib.name_str(heavier_name)
+    return runfiles_groups.name_str(lighter_name) + "+" + runfiles_groups.name_str(heavier_name)
 
 def _make_join_group_names(prefix):
     def _join(lighter_name, _lighter_weight, heavier_name, _heavier_weight):
-        stripped = lib.name_str(heavier_name)
+        stripped = runfiles_groups.name_str(heavier_name)
         if stripped.startswith(prefix):
             stripped = stripped[len(prefix):]
-        return lib.name_str(lighter_name) + "+" + stripped
+        return runfiles_groups.name_str(lighter_name) + "+" + stripped
 
     return _join
 
@@ -99,10 +99,10 @@ def _test_one(ctx, binary_attr):
     default_info = binary_attr[DefaultInfo]
     default_runfiles = default_info.default_runfiles
 
-    # lib.resolve() also validates every entry and that executable_group names a
-    # surviving group, so a malformed provider fails here with the binary's label
-    # rather than inside somebody's packaging rule.
-    resolved = lib.resolve(ctx, binary_attr, aspect_hints = [])
+    # runfiles_groups.resolve() also validates every entry and that
+    # executable_group names a surviving group, so a malformed provider fails here
+    # with the binary's label rather than inside somebody's packaging rule.
+    resolved = runfiles_groups.resolve(ctx, binary_attr, aspect_hints = [])
     if resolved == None:
         return (False, [
             "doesn't provide RunfilesGroupInfo even though {} is True.".format(_ENABLED_SETTING),
@@ -114,11 +114,11 @@ def _test_one(ctx, binary_attr):
 
     # Materialized once per group, outside the per-component loop: a group whose
     # contents are a files-only depset has no symlinks, root symlinks or empty
-    # filenames to read, and lib.runfiles() is what turns "no symlinks" into the
-    # empty depsets the comparison below needs. Doing it inside the loop would build
-    # four runfiles objects per group instead of one.
+    # filenames to read, and runfiles_groups.runfiles() is what turns "no symlinks"
+    # into the empty depsets the comparison below needs. Doing it inside the loop
+    # would build four runfiles objects per group instead of one.
     groups = [
-        (lib.name_str(entry.name), lib.runfiles(ctx, entry))
+        (runfiles_groups.name_str(entry.name), runfiles_groups.runfiles(ctx, entry))
         for entry in resolved.groups
     ]
 
@@ -182,7 +182,7 @@ def _test_one(ctx, binary_attr):
     # Apply the optional group limit and check the resulting names and count.
     if ctx.attr.max_groups >= 0:
         join_fn = _make_join_group_names(ctx.attr.group_name_prefix) if ctx.attr.group_name_prefix else _join_group_names
-        resolved = lib.limit(
+        resolved = runfiles_groups.limit(
             ctx,
             resolved,
             max_groups = ctx.attr.max_groups,
@@ -208,7 +208,7 @@ def _test_one(ctx, binary_attr):
 
     # Expectations are written as strings in BUILD files, so both name forms are
     # compared in their canonical string form.
-    actual_names = [lib.name_str(entry.name) for entry in resolved.groups]
+    actual_names = [runfiles_groups.name_str(entry.name) for entry in resolved.groups]
     if ctx.attr.expected_group_names:
         if actual_names != ctx.attr.expected_group_names:
             success = False
@@ -219,7 +219,7 @@ def _test_one(ctx, binary_attr):
                 _INDENT + str(actual_names),
             )
 
-    actual_executable_group = lib.name_str(resolved.executable_group) if resolved.executable_group != None else None
+    actual_executable_group = runfiles_groups.name_str(resolved.executable_group) if resolved.executable_group != None else None
     if ctx.attr.expected_executable_group and actual_executable_group != ctx.attr.expected_executable_group:
         success = False
         issues.append("expected executable_group '{}' but got {}".format(
@@ -235,7 +235,8 @@ def _test_one_disabled(binary_attr):
         return (True, [])
     return (False, [
         ("still provides RunfilesGroupInfo even though {} is False.\n" +
-         "Gate emission on lib.is_enabled(ctx) (and merge lib.RULE_ATTRS into the rule's attrs).").format(_ENABLED_SETTING),
+         "Gate emission on runfiles_groups.is_enabled(ctx) (and merge " +
+         "runfiles_groups.RULE_ATTRS into the rule's attrs).").format(_ENABLED_SETTING),
     ])
 
 def _runfiles_group_analysis_test_impl(ctx):
@@ -325,20 +326,20 @@ small target that checks it. Must not be a select().
 If set, the test verifies that the ordered group names (after optional merging and rank-based ordering)
 match this list exactly. Applies to all binaries in the test.
 
-Names are compared in canonical string form (lib.name_str), so a group named by a Label
-is written as its canonical label string, e.g. "@@//src:lib_a".
+Names are compared in canonical string form (runfiles_groups.name_str), so a group
+named by a Label is written as its canonical label string, e.g. "@@//src:lib_a".
 """,
         ),
         "expected_executable_group": attr.string(
             doc = """\
 If set, the test verifies that RunfilesGroupInfo.executable_group (after optional
-merging) is exactly this group name, in canonical string form (lib.name_str) -- so a
-group named by a Label is written as its canonical label string. Applies to all
-binaries in the test.
+merging) is exactly this group name, in canonical string form
+(runfiles_groups.name_str) -- so a group named by a Label is written as its
+canonical label string. Applies to all binaries in the test.
 """,
         ),
         "max_groups": attr.int(
-            doc = "If >= 0, apply lib.limit with this limit before ordering. -1 means no limit.",
+            doc = "If >= 0, apply runfiles_groups.limit with this limit before ordering. -1 means no limit.",
             default = -1,
         ),
         "expected_group_count": attr.int(

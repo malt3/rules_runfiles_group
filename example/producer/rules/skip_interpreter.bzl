@@ -4,7 +4,7 @@ Users add it to a binary's aspect_hints when the interpreter is already present 
 the base image, so the packager should not ship it again.
 """
 
-load("@rules_runfiles_group//runfiles_group:lib.bzl", "lib")
+load("@rules_runfiles_group//runfiles_group:lib.bzl", "runfiles_groups")
 load("@rules_runfiles_group//runfiles_group:providers.bzl", "RunfilesGroupTransformInfo")
 
 _INTERPRETER = "starlark_runfiles_group#interpreter"
@@ -19,7 +19,7 @@ def _skip_interpreter_transform(resolved):
 
     # Fails loudly if the interpreter group happened to carry the executable,
     # instead of silently dropping the entrypoint's supporting files.
-    return lib.resolved(
+    return runfiles_groups.resolved(
         [entry for entry in resolved.groups if entry.name != _INTERPRETER],
         executable_group = resolved.executable_group,
     )

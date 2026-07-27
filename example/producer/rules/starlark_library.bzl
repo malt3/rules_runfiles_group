@@ -1,6 +1,6 @@
 """Implementation of the starlark_library rule."""
 
-load("@rules_runfiles_group//runfiles_group:lib.bzl", "lib")
+load("@rules_runfiles_group//runfiles_group:lib.bzl", "runfiles_groups")
 load("@rules_runfiles_group//runfiles_group:providers.bzl", "RunfilesGroupInfo")
 load("//producer/providers:providers.bzl", "StarlarkInfo")
 
@@ -67,7 +67,7 @@ def _starlark_library_impl(ctx):
 
     # Honor the global on/off switch: emit no RunfilesGroupInfo when disabled.
     # DefaultInfo and StarlarkInfo are still returned (deps rely on them).
-    if not lib.is_enabled(ctx):
+    if not runfiles_groups.is_enabled(ctx):
         return providers
 
     own_weight = ctx.attr.runfiles_weight if ctx.attr.runfiles_weight > 0 else None
@@ -81,7 +81,7 @@ def _starlark_library_impl(ctx):
     # depset, so the depset gains only one level of depth per library rather than
     # two -- which doubles how deep a dependency chain may get before Bazel's
     # nested set depth limit rejects it.
-    providers.append(RunfilesGroupInfo(entries = lib.collect(
+    providers.append(RunfilesGroupInfo(entries = runfiles_groups.collect(
         ctx,
         # Each of deps and data is an iterable of ctx.attr values, so a rule with
         # several Label-typed attributes collects from all of them in one call.
@@ -90,7 +90,7 @@ def _starlark_library_impl(ctx):
         # gets an entry synthesized for it.
         deps = [ctx.attr.deps],
         data = [ctx.attr.data],
-        own = [lib.entry(
+        own = [runfiles_groups.entry(
             # A per-target group: this library's own sources, and nothing else.
             # ctx.label is already interned and globally unique, so it needs no
             # ruleset prefix and costs nothing to name.
@@ -138,5 +138,5 @@ another ruleset (the recommendation is to use a module name, e.g. all
 JVM-shaped libraries across modules could use "rules_java").
 """,
         ),
-    }, **lib.RULE_ATTRS),
+    }, **runfiles_groups.RULE_ATTRS),
 )
