@@ -1,0 +1,10 @@
+--- a/MODULE.bazel
++++ b/MODULE.bazel
+@@ -1,6 +1,6 @@
+ module(
+     name = "rules_java",
+-    version = "0.0.0",
++    version = "99.0.0-dev.20260727.1.705d909",
+     bazel_compatibility = [">=7.0.0"],
+     compatibility_level = 1,
+ )
