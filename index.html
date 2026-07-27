@@ -1,0 +1,22 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Bazel Dev Registry</title>
+<style>
+body { font-family: system-ui, sans-serif; max-width: 800px; margin: 40px auto; padding: 0 20px; line-height: 1.6; }
+h1 { border-bottom: 1px solid #ccc; padding-bottom: 8px; }
+pre { background: #f4f4f4; padding: 16px; border-radius: 4px; overflow-x: auto; }
+code { background: #f4f4f4; padding: 2px 6px; border-radius: 3px; }
+</style>
+</head>
+<body>
+<h1>Bazel Dev Registry</h1>
+<p>Add this to your <code>.bazelrc</code>:</p>
+<pre>common --registry=https://bazel-contrib.github.io/rules_runfiles_group --registry=https://bcr.bazel.build</pre>
+
+<h2>Latest build</h2>
+<h3>rules_runfiles_group</h3>
+<pre>bazel_dep(name = "rules_runfiles_group", version = "99.0.0-dev.20260727.1.fe49e75")</pre>
+</body>
+</html>
