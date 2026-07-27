@@ -9,14 +9,15 @@ P = "starlark_runfiles_group#"
 # attribute kind Bazel has: attr.label (main), attr.label_list (deps),
 # attr.string_keyed_label_dict (plugins), attr.label_keyed_string_dict
 # (pinned_versions) and attr.label_list_dict (optional_features). All five are
-# dependency attributes, so starlark_app hands all five to one lib.collect(deps =
-# [...]) call -- see producer/rules/starlark_app.bzl.
+# dependency attributes, so starlark_app hands all five to one
+# runfiles_groups.collect(deps = [...]) call -- see producer/rules/starlark_app.bzl.
 #
 # What this package pins down: every library in every one of those attributes has
 # to end up in a group. The rule builds its DefaultInfo by flattening the
-# attributes by hand and its RunfilesGroupInfo through lib.collect(), so a library
-# lib's attribute walking misses lands in default_runfiles and in no group, which
-# is exactly what the completeness check in runfiles_group_analysis_test reports.
+# attributes by hand and its RunfilesGroupInfo through runfiles_groups.collect(),
+# so a library the attribute walking misses lands in default_runfiles and in no
+# group, which is exactly what the completeness check in
+# runfiles_group_analysis_test reports.
 
 starlark_library(
     name = "core",

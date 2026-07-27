@@ -8,44 +8,45 @@ Runfiles of a target, split into named groups.
 
 Fields:
 
-- `entries`: a depset of group entries, each built with `lib.entry()`. Every
-  entry carries its own name, contents and ordering/merge metadata, so a target
-  propagates its dependencies' groups by referencing their depsets rather than by
-  copying them. The per-target cost is therefore independent of how many groups
-  the transitive closure contains.
+- `entries`: a depset of group entries, each built with `runfiles_groups.entry()`.
+  Every entry carries its own name, contents and ordering/merge metadata, so a
+  target propagates its dependencies' groups by referencing their depsets rather
+  than by copying them. The per-target cost is therefore independent of how many
+  groups the transitive closure contains.
 
   A group's name is either a **Label**, meaning a per-target group ("the runfiles
   this one target contributes"), or a **string**, meaning a named group that
-  several targets contribute to. See `lib.entry()`, and `lib.name_str()` for
-  rendering either form as a string.
+  several targets contribute to. See `runfiles_groups.entry()`, and
+  `runfiles_groups.name_str()` for rendering either form as a string.
 
   A group's contents are either a **runfiles object** or, for a group that is only
-  files, a **depset of File**. Consumers read both through `lib.files(entry)` and
-  `lib.runfiles(ctx, entry)` and must not touch `entry.content` directly, other
-  than to pass it back to `lib.union()` or `lib.entry()`.
+  files, a **depset of File**. Consumers read both through
+  `runfiles_groups.files(entry)` and `runfiles_groups.runfiles(ctx, entry)` and must
+  not touch `entry.content` directly, other than to pass it back to
+  `runfiles_groups.union()` or `runfiles_groups.entry()`.
 
   The depset order MUST be `"default"` (stable): it is the only order that can be
   merged with every other order, which a producer needs in order to combine entry
   depsets coming from foreign rulesets. Starlark cannot read a depset's order
-  back, so build the depset with `lib.entries()` or `lib.collect()`, which do it
-  correctly. Traversal order is never observable: `lib.resolve()` sorts by
-  `(rank, name)`.
+  back, so build the depset with `runfiles_groups.entries()` or
+  `runfiles_groups.collect()`, which do it correctly. Traversal order is never
+  observable: `runfiles_groups.resolve()` sorts by `(rank, name)`.
 
   Group names MAY repeat across the depset -- two targets can each synthesize an
-  entry for the same shared data dependency. `lib.resolve()` folds duplicates by
-  name, unioning their contents.
+  entry for the same shared data dependency. `runfiles_groups.resolve()` folds
+  duplicates by name, unioning their contents.
 
 - `executable_group`: the *name* of the group that should receive the executable,
   the runfiles symlinks, the repo mapping manifest and the other supporting files
   of the entrypoint, or None to let the packager decide. Either name form.
 
   A name rather than a reference to an entry, because a name survives renaming,
-  merging and hint transforms, can be validated (`lib.resolve()` fails if it names
-  no surviving group), and is greppable. Entry references would compare by value,
-  so a stale one would silently match nothing -- or two entries at once.
+  merging and hint transforms, can be validated (`runfiles_groups.resolve()` fails
+  if it names no surviving group), and is greppable. Entry references would compare
+  by value, so a stale one would silently match nothing -- or two entries at once.
 
-  Only meaningful on the top-level target. `lib.collect()` never propagates a
-  dependency's, so nothing has to be stripped.
+  Only meaningful on the top-level target. `runfiles_groups.collect()` never
+  propagates a dependency's, so nothing has to be stripped.
 
 Unioning the contents of every entry must yield the same runfiles as
 DefaultInfo.default_runfiles. A group whose contents are a depset of File
@@ -61,7 +62,7 @@ _DEPSET_TYPE = type(depset())
 
 def _make_runfilesgroupinfo_init(*, entries, executable_group = None):
     if type(entries) != _DEPSET_TYPE:
-        fail("RunfilesGroupInfo: entries must be a depset of entries built with lib.entry(), got ", type(entries))
+        fail("RunfilesGroupInfo: entries must be a depset of entries built with runfiles_groups.entry(), got ", type(entries))
     if executable_group != None:
         if type(executable_group) == "string":
             if not executable_group:
@@ -78,7 +79,7 @@ RunfilesGroupInfo, _ = provider(
     doc = _DOC,
     init = _make_runfilesgroupinfo_init,
     fields = {
-        "entries": "depset of group entries, order = \"default\". Build it with lib.entries() or lib.collect().",
+        "entries": "depset of group entries, order = \"default\". Build it with runfiles_groups.entries() or runfiles_groups.collect().",
         "executable_group": "Label, str or None: name of the group that carries the executable and its supporting files.",
     },
 )

@@ -5,9 +5,9 @@ the group and then travels up the dependency graph by reference inside a depset;
 nothing rewrites it on the way. That is what makes the per-target cost of the
 protocol independent of the number of transitive groups.
 
-The provider is deliberately not part of the public API: `lib.entry()` and
-`lib.derive()` are the only supported constructors, so every entry in circulation
-has been validated.
+The provider is deliberately not part of the public API:
+`runfiles_groups.entry()` and `runfiles_groups.derive()` are the only supported
+constructors, so every entry in circulation has been validated.
 """
 
 # Why a schema'd provider rather than struct():
@@ -40,8 +40,8 @@ has been validated.
 # unless the provider is exported. A provider created inside a function is never
 # exported and its instances are rejected as depset elements.
 #
-# There is deliberately no init=: that would allocate a kwargs dict and a
-# Starlark frame for every group. Validation lives in lib.entry() instead.
+# There is deliberately no init=: that would allocate a kwargs dict and a Starlark
+# frame for every group. Validation lives in runfiles_groups.entry() instead.
 
 # Closed set of group kinds. "" means unspecified.
 #
@@ -60,9 +60,9 @@ KINDS = [
     "docs",  # documentation, licences, manifests
 ]
 
-# The metadata a group has when its producer sets none of it -- lib.entry()'s
-# defaults. Exported as the reference default for consumers; entries themselves
-# always carry explicit values.
+# The metadata a group has when its producer sets none of it --
+# runfiles_groups.entry()'s defaults. Exported as the reference default for
+# consumers; entries themselves always carry explicit values.
 DEFAULT_METADATA = struct(
     rank = 0,
     do_not_merge = False,
@@ -78,15 +78,16 @@ RunfilesGroupEntryInfo = provider(
 Label or str: the group's identity. A Label means a per-target group -- "the
 runfiles this one target contributes" -- and needs no prefix, because a Label is
 globally unique. A string means a named group that several targets contribute to;
-prefix those with something unique to your ruleset. lib.name_str() renders either
-form as a string.
+prefix those with something unique to your ruleset. runfiles_groups.name_str()
+renders either form as a string.
 """,
         "content": """\
 runfiles or depset of File: the contents of this group. A depset is the shorthand
 for a group that is only files, which costs a producer nothing to hand over; a
-runfiles object is the general form. Read it with lib.files(entry) or
-lib.runfiles(ctx, entry), which handle both, and pass it to lib.union() or
-lib.entry() unchanged -- the two forms are otherwise not interchangeable.
+runfiles object is the general form. Read it with runfiles_groups.files(entry) or
+runfiles_groups.runfiles(ctx, entry), which handle both, and pass it to
+runfiles_groups.union() or runfiles_groups.entry() unchanged -- the two forms are
+otherwise not interchangeable.
 """,
         "kind": "str: one of KINDS. A stable selector for packagers. \"\" means unspecified.",
         "rank": "int: partial ordering key. Lower rank = earlier = more cacheable. Default 0.",

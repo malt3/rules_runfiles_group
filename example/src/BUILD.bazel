@@ -174,10 +174,10 @@ starlark_binary(
 )
 
 # Two targets contributing to ONE named group, handing over the two different
-# content forms: shared_docs_a gives lib the depset of File itself, shared_docs_b
-# gives it a runfiles object. That is the only way a fold has to union the forms
-# across producers, and lib.resolve() has to lift the depset side to do it -- which
-# is why it takes a ctx. If it dropped either side instead, the completeness check
+# content forms: shared_docs_a hands over the depset of File itself, shared_docs_b
+# a runfiles object. That is the only way a fold has to union the forms across
+# producers, and runfiles_groups.resolve() has to lift the depset side to do it --
+# which is why it takes a ctx. If it dropped either side instead, the completeness check
 # below would fail with the missing file named.
 shared_bundle(
     name = "shared_docs_a",
@@ -208,7 +208,7 @@ starlark_binary(
 # alongside a library, whose group is named by Label -- so a Label and a string
 # land in the same rank and the same merge bucket. Sorting or comparing them
 # directly is an error in Starlark, so this is what pins the form discriminator
-# in lib's sort keys: remove it and this target fails to analyze.
+# in the sort keys: remove it and this target fails to analyze.
 starlark_binary(
     name = "inner_by_repo",
     src = "adder.star",

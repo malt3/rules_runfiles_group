@@ -7,7 +7,7 @@ both name their per-target groups by Label without any risk of collision -- ther
 is no prefix to agree on, because a Label is already unique.
 """
 
-load("@rules_runfiles_group//runfiles_group:lib.bzl", "lib")
+load("@rules_runfiles_group//runfiles_group:lib.bzl", "runfiles_groups")
 load("@rules_runfiles_group//runfiles_group:providers.bzl", "RunfilesGroupInfo")
 
 # This ruleset stamps its own module-style affinity on every group it emits.
@@ -23,7 +23,7 @@ def _asset_bundle_impl(ctx):
     ]
 
     # Honor the global on/off switch: emit no RunfilesGroupInfo when disabled.
-    if not lib.is_enabled(ctx):
+    if not runfiles_groups.is_enabled(ctx):
         return providers
 
     # A leaf: one per-target group of its own, nothing to collect. The group keeps
@@ -32,11 +32,11 @@ def _asset_bundle_impl(ctx):
     # save nothing here -- and it keeps a second content form in circulation, which
     # is what exercises lib's mixed unions when a packager merges these groups with
     # a starlark_library's files-only ones.
-    providers.append(RunfilesGroupInfo(entries = lib.entries([lib.entry(
+    providers.append(RunfilesGroupInfo(entries = runfiles_groups.entries([runfiles_groups.entry(
         name = ctx.label,
         content = runfiles,
         kind = "first_party",
-        rank = lib.RANK_SHARED_DEPS,
+        rank = runfiles_groups.RANK_SHARED_DEPS,
         weight = ctx.attr.weight if ctx.attr.weight > 0 else None,
         merge_affinity = _AFFINITY,
     )])))
@@ -53,5 +53,5 @@ asset_bundle = rule(
             default = 0,
             doc = "Weight hint for this bundle's runfiles group. If > 0, set as the group entry's weight.",
         ),
-    }, **lib.RULE_ATTRS),
+    }, **runfiles_groups.RULE_ATTRS),
 )
