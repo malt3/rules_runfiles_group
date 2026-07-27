@@ -57,7 +57,6 @@ Tested against Bazel 7, 8, 9 and rolling.
 |----------|:-:|:-:|---------|
 | `DefaultInfo` | **must** return | — | The executable and runfiles tree. The fallback when `RunfilesGroupInfo` is absent or unsupported. |
 | `RunfilesGroupInfo` | may return | — | Splits `DefaultInfo.default_runfiles` into named groups, and names the group that carries the executable. |
-| `RunfilesGroupMetadataInfo` | rarely | may add | Per-group metadata *overrides*, for groups you don't own. Producers put metadata directly on their own groups. |
 | `RunfilesGroupTransformInfo` | — | may add | Transforms the resolved group set (drop a group, remap names, re-rank). |
 
 ```starlark
@@ -89,8 +88,8 @@ The full API reference is generated from the docstrings in
 smarter layer splitting with no change to your `BUILD` files.
 
 **Customizing groups with `aspect_hints`.** Rulesets may ship hint targets as mixins that adjust
-how groups are transformed or what metadata they carry — for example, one that drops the
-interpreter group because the base image already has it:
+how groups are transformed — for example, one that drops the interpreter group because the base
+image already has it:
 
 ```starlark
 load("@rules_foo//foo:hints.bzl", "skip_interpreter")
@@ -104,11 +103,10 @@ foo_binary(
 )
 ```
 
-Hints work by attaching `RunfilesGroupTransformInfo` or `RunfilesGroupMetadataInfo`, which
-packaging rules pick up through an aspect; several can be combined on one target. You can also
-write your own rules that apply an aspect to a binary to synthesize `RunfilesGroupInfo` — to
-enforce an organization-wide layering policy, say. See
-[the resolution protocol](#the-resolution-protocol).
+Hints work by attaching `RunfilesGroupTransformInfo`, which packaging rules pick up through an
+aspect; several can be combined on one target. You can also write your own rules that apply an
+aspect to a binary to synthesize `RunfilesGroupInfo` — to enforce an organization-wide layering
+policy, say. See [the resolution protocol](#the-resolution-protocol).
 
 ---
 
@@ -391,9 +389,9 @@ transition, so one target covers:
    `overlapping_group_behavior` picks `"warn"` (default), `"error"` or `"ignore"`.
 4. **Ordering and merging** — asserted with `expected_group_names`, `expected_executable_group`,
    `max_groups` and `expected_group_count`.
-5. **The global switch** — with the flag `False`, the binary must provide neither
-   `RunfilesGroupInfo` nor `RunfilesGroupMetadataInfo`. Both branches are pinned by the transition,
-   so the result doesn't depend on the flag's value on the command line.
+5. **The global switch** — with the flag `False`, the binary must provide no `RunfilesGroupInfo`.
+   Both branches are pinned by the transition, so the result doesn't depend on the flag's value on
+   the command line.
 
 ```starlark
 load("@rules_runfiles_group//runfiles_group:runfiles_group_analysis_test.bzl", "runfiles_group_analysis_test")
@@ -423,12 +421,9 @@ runfiles_group_analysis_test(
 1. **Obtains the entries.** Returns `None` if the target carries no groups — package
    `DefaultInfo.default_runfiles` as a single group and skip the rest.
 2. **Flattens exactly once** and folds duplicate names, unioning their contents.
-3. **Accumulates metadata overrides** — the target's own `RunfilesGroupMetadataInfo` first, then
-   each `aspect_hints` entry that provides one, per-key last-wins. Each override is a patch; fields
-   it omits are left alone.
-4. **Applies transforms** from every `aspect_hints` entry providing
+3. **Applies transforms** from every `aspect_hints` entry providing
    `RunfilesGroupTransformInfo`, in order, re-validating each result.
-5. **Orders by `(rank, name)`.**
+4. **Orders by `(rank, name)`.**
 
 It returns `struct(groups, by_name, executable_group)`, where `by_name` is
 `dict[Label|str, entry]` keyed by whichever name form the producer used, and `executable_group` is

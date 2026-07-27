@@ -35,7 +35,6 @@ bzl_library(
     visibility = ["//visibility:public"],
     deps = [
         "//runfiles_group/private/providers:runfiles_group_info",
-        "//runfiles_group/private/providers:runfiles_group_metadata_info",
         "//runfiles_group/private/providers:runfiles_group_transform_info",
     ],
 )
