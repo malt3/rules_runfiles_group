@@ -225,11 +225,16 @@ so it is O(direct deps) and flattens nothing:
 ```starlark
 providers.append(RunfilesGroupInfo(entries = lib.collect(
     ctx,
-    deps = ctx.attr.deps,
-    data = ctx.attr.data,
+    deps = [ctx.attr.deps, ctx.attr.exports],
+    data = [ctx.attr.data],
     own = [lib.entry(name = ctx.label, content = own_files, kind = "first_party")],
 )))
 ```
+
+`deps` and `data` are each an **iterable of `ctx.attr` values**, so a rule with several Label-typed
+attributes collects from all of them in one call — and entry depsets from somewhere other than an
+attribute (a toolchain, an aspect's accumulator) go in `transitive = [...]` rather than into a second
+depset wrapped around the result.
 
 **Aspect-based.** Apply an aspect to `deps` in the `*_binary` rule and collect entries while
 walking the graph. This leaves `*_library` rules untouched but needs an aspect.
@@ -323,10 +328,32 @@ claim the outer entrypoint.
 ### Handling `deps` and `data`
 
 Both are mandatory keywords on `lib.collect()`, because `data` is the classic footgun here — pass
-`data = []` explicitly if your rule has none.
+`data = []` explicitly if your rule has none. Each is an iterable of `ctx.attr` values, and every
+Label-typed attribute kind is accepted, whatever shape `ctx.attr` gives it:
+
+| Attribute kind | `ctx.attr` value |
+|----------------|------------------|
+| `attr.label` | a `Target` |
+| `attr.label_list` | a list of `Target` |
+| `attr.label_keyed_string_dict` | `Target` → string |
+| `attr.string_keyed_label_dict` | string → `Target` |
+| `attr.label_list_dict` (Bazel 9+) | string → list of `Target` |
+
+Every `Target` found contributes; the string side of a keyed dict is skipped. A rule with a single
+`label_list` can still pass `deps = ctx.attr.deps` unwrapped, since a list of `Target` is itself an
+iterable of legal elements.
+[`example/producer/rules/starlark_app.bzl`](example/producer/rules/starlark_app.bzl) is a rule that
+collects from one attribute of every kind, with
+[`example/src/app/`](example/src/app/) checking that each one's libraries land in a group.
 
 **`deps`** are usually your own `*_library` targets, which provide `RunfilesGroupInfo`; their entry
-depsets are referenced directly.
+depsets are referenced directly. A `deps` target *without* `RunfilesGroupInfo` contributes nothing —
+there is no synthesized fallback. These are your ruleset's own targets, so one that doesn't speak the
+protocol is a bug, and synthesizing a group would both hide it and claim that target's whole
+`DefaultInfo`, which for a `*_library` is its entire closure's runfiles and overlaps the groups of
+everything else that closure reaches. So a dependency that has no `RunfilesGroupInfo` *and*
+contributes to your `default_runfiles` belongs in `data`, or a packager will find no group holding
+its files.
 
 **`data`** can be anything. For targets without `RunfilesGroupInfo`, `lib.collect()` synthesizes a
 per-target entry named by the dep's `Label`, covering its `DefaultInfo.files` and

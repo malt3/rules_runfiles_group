@@ -83,8 +83,13 @@ def _starlark_library_impl(ctx):
     # nested set depth limit rejects it.
     providers.append(RunfilesGroupInfo(entries = lib.collect(
         ctx,
-        deps = ctx.attr.deps,
-        data = ctx.attr.data,
+        # Each of deps and data is an iterable of ctx.attr values, so a rule with
+        # several Label-typed attributes collects from all of them in one call.
+        # This rule has one of each, and they are handled differently: a `deps`
+        # target without RunfilesGroupInfo contributes nothing, where a `data` one
+        # gets an entry synthesized for it.
+        deps = [ctx.attr.deps],
+        data = [ctx.attr.data],
         own = [lib.entry(
             # A per-target group: this library's own sources, and nothing else.
             # ctx.label is already interned and globally unique, so it needs no

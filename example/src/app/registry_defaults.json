@@ -1,0 +1,4 @@
+{
+  "enabled_features": ["units"],
+  "log_level": "info"
+}

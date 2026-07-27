@@ -172,7 +172,7 @@ def _starlark_binary_impl(ctx):
         # A *_library must never do this -- it only ever calls lib.collect().
         collected = lib.resolve(
             ctx,
-            lib.collect(ctx, deps = ctx.attr.deps, data = ctx.attr.data),
+            lib.collect(ctx, deps = [ctx.attr.deps], data = [ctx.attr.data]),
             aspect_hints = [],
         )
 
