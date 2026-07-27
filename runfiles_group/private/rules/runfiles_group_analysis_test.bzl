@@ -24,7 +24,6 @@ runfiles_group_analysis_test(
 load("@bazel_skylib//lib:sets.bzl", "sets")
 load("//runfiles_group/private:lib.bzl", "lib")
 load("//runfiles_group/private/providers:runfiles_group_info.bzl", "RunfilesGroupInfo")
-load("//runfiles_group/private/providers:runfiles_group_metadata_info.bzl", "RunfilesGroupMetadataInfo")
 
 _INDENT = "    "
 
@@ -231,20 +230,12 @@ def _test_one(ctx, binary_attr):
     return (success, issues)
 
 def _test_one_disabled(binary_attr):
-    """Checks that a binary emits no runfiles group providers when the switch is off."""
-    leaked = []
-    if RunfilesGroupInfo in binary_attr:
-        leaked.append("RunfilesGroupInfo")
-    if RunfilesGroupMetadataInfo in binary_attr:
-        leaked.append("RunfilesGroupMetadataInfo")
-    if len(leaked) == 0:
+    """Checks that a binary emits no RunfilesGroupInfo when the switch is off."""
+    if RunfilesGroupInfo not in binary_attr:
         return (True, [])
     return (False, [
-        ("still provides {} even though {} is False.\n" +
-         "Gate emission on lib.is_enabled(ctx) (and merge lib.RULE_ATTRS into the rule's attrs).").format(
-            " and ".join(leaked),
-            _ENABLED_SETTING,
-        ),
+        ("still provides RunfilesGroupInfo even though {} is False.\n" +
+         "Gate emission on lib.is_enabled(ctx) (and merge lib.RULE_ATTRS into the rule's attrs).").format(_ENABLED_SETTING),
     ])
 
 def _runfiles_group_analysis_test_impl(ctx):
@@ -304,9 +295,9 @@ target also verifies that the rule honors the global on/off switch
 (@rules_runfiles_group//runfiles_group:enabled):
 
   * enabled: all of the checks above run against the emitted providers.
-  * disabled: the binary must provide neither RunfilesGroupInfo nor
-    RunfilesGroupMetadataInfo. Set check_disabled = False to skip this branch,
-    which avoids analyzing the binary's whole closure a second time.
+  * disabled: the binary must provide no RunfilesGroupInfo at all. Set
+    check_disabled = False to skip this branch, which avoids analyzing the
+    binary's whole closure a second time.
 
 Because both branches are pinned by the transition, the test is independent of the
 value the flag has on the command line.
@@ -321,8 +312,7 @@ value the flag has on the command line.
             default = True,
             doc = """\
 Also analyze every binary with @rules_runfiles_group//runfiles_group:enabled set
-to False and verify it emits neither RunfilesGroupInfo nor
-RunfilesGroupMetadataInfo.
+to False and verify it emits no RunfilesGroupInfo.
 
 This is the only automated check of the producer contract's one MUST, so it is on
 by default. It does cost a second configuration for the binary and its entire

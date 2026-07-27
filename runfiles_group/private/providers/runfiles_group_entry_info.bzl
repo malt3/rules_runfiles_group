@@ -60,6 +60,17 @@ KINDS = [
     "docs",  # documentation, licences, manifests
 ]
 
+# The metadata a group has when its producer sets none of it -- lib.entry()'s
+# defaults. Exported as the reference default for consumers; entries themselves
+# always carry explicit values.
+DEFAULT_METADATA = struct(
+    rank = 0,
+    do_not_merge = False,
+    weight = None,
+    kind = "",
+    merge_affinity = "",
+)
+
 RunfilesGroupEntryInfo = provider(
     doc = "One runfiles group: a name, its contents, and its ordering/merge metadata.",
     fields = {

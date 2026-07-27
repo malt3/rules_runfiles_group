@@ -44,8 +44,7 @@ CONSUMER SIDE -- flatten exactly ONCE per consuming target:
 
     lib.resolve(ctx, source, aspect_hints = )
         THE ONLY to_list() IN THE PROTOCOL. Flattens the entry depset, folds
-        duplicate group names, applies the metadata overrides from the target and
-        from `aspect_hints`, runs the hint transforms, and orders by (rank, name).
+        duplicate group names, runs the hint transforms, and orders by (rank, name).
         Returns struct(groups, by_name, executable_group), or None when the source
         carries no groups -- in which case the packager must fall back to
         DefaultInfo.default_runfiles as a single group.
@@ -74,10 +73,6 @@ CONSUMER SIDE -- flatten exactly ONCE per consuming target:
         do_not_merge, merge_affinity and weight. Returns a resolved value plus
         `group_count`, which the caller MUST check: do_not_merge and rank
         constraints can make max_groups unreachable.
-    lib.merge_metadata(*metadata_infos)
-        Dict-merges RunfilesGroupMetadataInfo overrides. Per-key last-wins.
-    lib.group_metadata(**fields)
-        A metadata override patch carrying only the fields passed.
 
 lib.resolve and lib.limit take a `ctx` for one reason: unioning a files-only
 group's depset with another group's runfiles object requires ctx.runfiles(), the
@@ -88,8 +83,8 @@ rule. Never from a *_library rule: lib.collect() is the O(1) call, lib.resolve()
 the O(closure) one.
 
 lib.KINDS / lib.DEFAULT_METADATA
-    The closed set of `kind` values and the metadata a group has when nothing
-    overrides it.
+    The closed set of `kind` values and the metadata a group has when its producer
+    sets none of it.
 
 lib.RULE_ATTRS / lib.is_enabled(ctx)
     A pair. Rule authors merge lib.RULE_ATTRS into their rule's attrs to gain
@@ -107,15 +102,13 @@ lib.RANK_FOUNDATION / lib.RANK_SHARED_DEPS / lib.RANK_EXECUTABLE
 """
 
 load("@bazel_skylib//rules:common_settings.bzl", "BuildSettingInfo")
-load("//runfiles_group/private/providers:runfiles_group_entry_info.bzl", "KINDS", "RunfilesGroupEntryInfo")
-load("//runfiles_group/private/providers:runfiles_group_info.bzl", "RunfilesGroupInfo")
 load(
-    "//runfiles_group/private/providers:runfiles_group_metadata_info.bzl",
+    "//runfiles_group/private/providers:runfiles_group_entry_info.bzl",
     "DEFAULT_METADATA",
-    "ENTRY_PATCH_FIELDS",
-    "RunfilesGroupMetadataInfo",
-    "group_metadata",
+    "KINDS",
+    "RunfilesGroupEntryInfo",
 )
+load("//runfiles_group/private/providers:runfiles_group_info.bzl", "RunfilesGroupInfo")
 load("//runfiles_group/private/providers:runfiles_group_transform_info.bzl", "RunfilesGroupTransformInfo")
 
 # Recommended rank anchors (see README "Recommended rank values").
@@ -781,27 +774,6 @@ def _combine_str(a, b):
         return a
     return min(a, b)
 
-def _apply_overlay(by_name, executable_group, metadata_info):
-    """Applies one RunfilesGroupMetadataInfo. Fields a patch omits stay unchanged."""
-    for name, patch in metadata_info.groups.items():
-        entry = by_name.get(name)
-        if entry == None:
-            # Overrides for groups that do not exist are ignored, so one hint can
-            # be attached to targets producing different group sets.
-            continue
-        overrides = {}
-        for field in ENTRY_PATCH_FIELDS:
-            if hasattr(patch, field):
-                overrides[field] = getattr(patch, field)
-        if overrides:
-            by_name[name] = _derive(entry, **overrides)
-        if hasattr(patch, "executable_group"):
-            if patch.executable_group:
-                executable_group = name
-            elif executable_group == name:
-                executable_group = None
-    return executable_group
-
 def _unpack(source):
     """Returns (entries depset or None, executable_group) for a resolve source."""
     kind = type(source)
@@ -825,7 +797,7 @@ def _check_ctx(where, ctx):
         fail("{}: first argument must be the rule or aspect ctx, got {}".format(where, type(ctx)))
 
 def _resolve(ctx, source, *, aspect_hints):
-    """Flattens, folds, overlays, transforms and orders a target's runfiles groups.
+    """Flattens, folds, transforms and orders a target's runfiles groups.
 
     This is the only place in the protocol that flattens a depset. Call it once per
     *consuming* target, never from a library rule.
@@ -858,15 +830,6 @@ def _resolve(ctx, source, *, aspect_hints):
             _described_name(executable_group),
             _sorted_name_strs(by_name),
         ))
-
-    # Overrides are accumulated before the transforms run, so a transform sees the
-    # overridden metadata. The target's own overrides come first, then the hints in
-    # order, per-key last-wins.
-    if type(source) == _TARGET_TYPE and RunfilesGroupMetadataInfo in source:
-        executable_group = _apply_overlay(by_name, executable_group, source[RunfilesGroupMetadataInfo])
-    for hint in aspect_hints:
-        if RunfilesGroupMetadataInfo in hint:
-            executable_group = _apply_overlay(by_name, executable_group, hint[RunfilesGroupMetadataInfo])
 
     resolved = _make_resolved(by_name, executable_group)
 
@@ -1149,36 +1112,6 @@ def _limit(ctx, resolved, *, max_groups, default_weight = 0, merged_group_name =
         group_count = len(by_name),
     )
 
-# ------------------------------------------------------------------- metadata
-
-def _merge_metadata(*metadata_infos):
-    """Dict-merges RunfilesGroupMetadataInfo overrides. Per-key last-wins.
-
-    Allocates one dict and one provider regardless of arity, and returns a sole
-    non-None argument by identity.
-
-    Args:
-        *metadata_infos: RunfilesGroupMetadataInfo instances, or None.
-
-    Returns:
-        A RunfilesGroupMetadataInfo, or None if every argument was None.
-    """
-    first = None
-    merged = None
-    for m in metadata_infos:
-        if m == None:
-            continue
-        if merged != None:
-            merged.update(m.groups)
-        elif first == None:
-            first = m
-        else:
-            merged = dict(first.groups)
-            merged.update(m.groups)
-    if merged == None:
-        return first
-    return RunfilesGroupMetadataInfo(groups = merged)
-
 # ---------------------------------------------------------------- global flag
 
 # Attribute fragment consumers merge into their rule's attrs to read the global
@@ -1223,9 +1156,7 @@ lib = struct(
     group_names = _group_names,
     index_by_name_str = _index_by_name_str,
     limit = _limit,
-    # metadata overrides (aspect_hints)
-    group_metadata = group_metadata,
-    merge_metadata = _merge_metadata,
+    # entry metadata vocabulary
     KINDS = KINDS,
     DEFAULT_METADATA = DEFAULT_METADATA,
     # Global on/off switch (see //runfiles_group:enabled). RULE_ATTRS and
