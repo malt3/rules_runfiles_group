@@ -18,6 +18,10 @@ bytes without traversing its backing array.
 The check is deliberately shape-based rather than an absolute byte budget: it
 survives Bazel version bumps, which move the constants but not the asymptote.
 
+It covers a *rule's* own providers. RunfilesGroupInfo lives on the aspect's node,
+which `bazel dump --memory` cannot address; see "Keeping analysis memory flat" in
+the README.
+
 Usage:
     heap_budget.py small.txt large.txt [--max-growth 1.3]
 """

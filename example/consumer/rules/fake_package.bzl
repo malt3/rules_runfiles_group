@@ -1,5 +1,6 @@
 """Consumer rule that resolves runfiles groups from a binary via an aspect."""
 
+load("@rules_runfiles_group//runfiles_group:aspect.bzl", "runfiles_group_aspect")
 load("@rules_runfiles_group//runfiles_group:lib.bzl", "runfiles_groups")
 
 # The aspect exists for exactly one reason: aspect_hints is only reachable from an
@@ -87,8 +88,13 @@ fake_package = rule(
     attrs = {
         "binary": attr.label(
             mandatory = True,
-            aspects = [_fake_package_aspect],
-            doc = "A binary target. RunfilesGroupInfo is used when present.",
+            # runfiles_group_aspect is what produces RunfilesGroupInfo at all: it
+            # asks every target in the closure how it is grouped, through the
+            # `_runfiles_group_callback` attribute a participating rule carries. A
+            # packaging rule that does not attach it sees no groups and packages
+            # every binary as one flat layer.
+            aspects = [_fake_package_aspect, runfiles_group_aspect],
+            doc = "A binary target. Its runfiles groups are used when it has any.",
         ),
     },
 )

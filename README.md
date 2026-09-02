@@ -28,8 +28,8 @@ pkg_creator(
 Nothing about this is mandatory on either side. A packager that meets a binary without
 `RunfilesGroupInfo` falls back to `DefaultInfo.default_runfiles` as a single group.
 
-**Who should read what:** users → [For users](#for-users). Authors of `*_binary` rules →
-[For \*\_binary rule authors](#for-_binary-rule-authors). Authors of packaging rules →
+**Who should read what:** users → [For users](#for-users). Authors of `*_binary` and `*_library`
+rules → [For \*\_binary rule authors](#for-_binary-rule-authors). Authors of packaging rules →
 [For packaging rule authors](#for-packaging-rule-authors).
 
 ## Installation
@@ -56,8 +56,9 @@ Tested against Bazel 7, 8, 9 and rolling.
 | Provider | `*_binary` rule | `aspect_hints` | Purpose |
 |----------|:-:|:-:|---------|
 | `DefaultInfo` | **must** return | — | The executable and runfiles tree. The fallback when `RunfilesGroupInfo` is absent or unsupported. |
-| `RunfilesGroupInfo` | may return | — | Splits `DefaultInfo.default_runfiles` into named groups, and names the group that carries the executable. |
+| `RunfilesGroupInfo` | **never** returns | — | Splits `DefaultInfo.default_runfiles` into named groups, and names the group that carries the executable. Produced only by `runfiles_group_aspect`. |
 | `RunfilesGroupTransformInfo` | — | may add | Transforms the resolved group set (drop a group, remap names, re-rank). |
+| `RunfilesGroupCallbackInfo` | — | — | Returned by a ruleset's *callback targets*: the describe function the aspect calls. This is how a ruleset opts in — see [The callback protocol](#the-callback-protocol). |
 
 ```starlark
 RunfilesGroupInfo(
@@ -114,39 +115,113 @@ policy, say. See [the resolution protocol](#the-resolution-protocol).
 
 If splitting runfiles isn't meaningful for your rule — a single statically linked executable, say —
 do nothing; packagers fall back to `DefaultInfo`. If it is (interpreter, standard library,
-first-party code, third-party deps, debug symbols), return `RunfilesGroupInfo` alongside
-`DefaultInfo`.
+first-party code, third-party deps, debug symbols), teach your rules to describe themselves.
 
-### Honoring the global on/off switch
+**A rule never returns `RunfilesGroupInfo`.** There is exactly one way to produce it: a *describe
+function*, published on a target, that `runfiles_group_aspect` calls. That is the whole of this
+section — everything below about entries, names, ranks and metadata is what a describe function
+builds.
 
-The providers cost a little memory on every target that emits them, wasted when no packaging rule
-in the build consumes them, so one global flag — shared by every producing ruleset — gates
-emission. Honor it with two pieces from `runfiles_groups`, which are **a pair**:
+### The callback protocol
 
-1. Merge `runfiles_groups.RULE_ATTRS` into your rule's `attrs`. It adds a private attribute pointing
-   at the flag, resolved in the `rules_runfiles_group` repo context, so you never name the label.
-2. Gate emission on `runfiles_groups.is_enabled(ctx)`, returning **before** any grouping work.
-   Without step 1 this attribute read fails.
+The description does not travel through a `load()`, and it can't: a packaging ruleset that
+`load()`ed a describe function out of every language it supports would take a `bazel_dep` on each of
+them, and their whole transitive module graphs, on behalf of every one of its users. Some rulesets
+cannot be `load()`ed from a rule at all — `rules_java` is in Bazel's WORKSPACE autoload set, where
+an extra load-time dependency reintroduces a resolution cycle
+([bazelbuild/bazel#23043](https://github.com/bazelbuild/bazel/issues/23043)).
+
+So it travels through a **provider on a target**. For each target it visits, the aspect reads the
+well-known implicit attribute `_runfiles_group_callback`, takes `RunfilesGroupCallbackInfo` off the
+target it points at, and calls that provider's `describe` function. The aspect knows nothing about
+any language, and your rule `.bzl` files need not name this module at all.
+
+You write a handful of callback targets — one per rule family, not one per rule and certainly not
+one per target — and one attribute on each rule pointing at the right one:
 
 ```starlark
+# //mylang:runfiles_group_support.bzl -- a support file, not a rule definition, so it
+# may load this module freely.
+load("@rules_runfiles_group//runfiles_group:callback.bzl", "RunfilesGroupCallbackInfo")
 load("@rules_runfiles_group//runfiles_group:lib.bzl", "runfiles_groups")
 load("@rules_runfiles_group//runfiles_group:providers.bzl", "RunfilesGroupInfo")
 
-my_binary = rule(
-    implementation = _my_binary_impl,
-    # dict(..., **runfiles_groups.RULE_ATTRS) works on all supported Bazel versions;
-    # _MY_BINARY_ATTRS | runfiles_groups.RULE_ATTRS is equivalent on newer Starlark.
-    attrs = dict(_MY_BINARY_ATTRS, **runfiles_groups.RULE_ATTRS),
-    executable = True,
-)
+def _library_groups(target, ctx, _payload):
+    # ctx is the *aspect's* context: the target's attributes are ctx.rule.attr
+    # (implicit ones included) and ctx.runfiles() works as it does in a rule.
+    return RunfilesGroupInfo(entries = runfiles_groups.collect(
+        ctx,
+        deps = [ctx.rule.attr.deps, ctx.rule.attr.exports],
+        data = [ctx.rule.attr.data],
+        own = [runfiles_groups.entry(
+            name = target.label,
+            content = target[MyLangInfo].own_files,
+            kind = "first_party",
+            merge_affinity = "mylang",
+        )],
+    ))
 
-def _my_binary_impl(ctx):
-    providers = [DefaultInfo(...)]
-    if not runfiles_groups.is_enabled(ctx):
-        return providers  # no ctx.runfiles(), no runfiles_groups.collect(), no provider
-    # ... build entries, then append RunfilesGroupInfo ...
-    return providers
+def _callback_impl(_ctx):
+    return [RunfilesGroupCallbackInfo(describe = _library_groups)]
+
+mylang_library_callback = rule(implementation = _callback_impl)
 ```
+
+```starlark
+# //mylang:rules.bzl
+mylang_library = rule(
+    implementation = _mylang_library_impl,   # returns DefaultInfo and MyLangInfo, nothing else
+    attrs = dict(_MYLANG_LIBRARY_ATTRS, **{
+        # The well-known name, specified by
+        # @rules_runfiles_group//runfiles_group:callback.bzl%RUNFILES_GROUP_CALLBACK_ATTR.
+        "_runfiles_group_callback": attr.label(default = Label("//mylang:library_callback")),
+    }),
+)
+```
+
+Dispatch is by *which target a rule points at*, not by `ctx.rule.kind`: a rule kind is only a name,
+and another ruleset may well reuse it. A rule with no such attribute is simply not describable, and
+packagers fall back to its `DefaultInfo.default_runfiles` — so this attribute is the entirety of
+your opt-in, and removing it is the entirety of your opt-out.
+
+Spelling the attribute name out rather than loading the constant is what keeps a rule `.bzl` free of
+any load-time dependency on this module. The constant exists so the name has one normative home, and
+so you can assert your hardcoded spelling against it from a test, where loading is free.
+
+### What a describe function can see
+
+A describe function runs inside an aspect, so it gets the target's providers and `ctx.rule.attr`.
+Two things it does not get, and how to hand them over:
+
+- **What the rule computed.** Files from `ctx.actions.declare_file` appear in no attribute. Publish
+  them on a provider of your own and read it off `target`. Doing so also pins the invariant that
+  matters: hand over the *same object* the rule put in `default_runfiles`, and the group and the
+  runfiles cannot drift apart.
+- **What toolchain resolution supplies.** An aspect can only resolve toolchain types it declared at
+  load time, and a language-agnostic aspect cannot know which those are. Resolve the toolchain in
+  the *callback target* — a rule of your own ruleset, and an implicit dependency of the described
+  target in the same configuration, so it sees the same resolution — and pass the result as
+  `RunfilesGroupCallbackInfo(payload = ...)`. The aspect hands it back to `describe` untouched.
+
+### `None` is not an empty group set
+
+A describe function returns `None` to say *"I cannot describe this target"*: the aspect produces no
+provider, and the target's dependents fall back to whatever they can synthesize from `DefaultInfo`.
+It returns `RunfilesGroupInfo(entries = depset())` to say *"this target is mine, and it contributes
+nothing at runtime"* — a `neverlink` library, say, whose runtime outputs and default runfiles are
+both empty. Say `None` where the second is true and the caller has to guess, which produces a
+spurious empty group named after a target that ships nothing.
+
+### The global on/off switch
+
+The providers cost a little memory on every target that carries them, wasted when no packaging rule
+in the build consumes them, so one global flag — shared by every producing ruleset — gates them:
+`@rules_runfiles_group//runfiles_group:enabled`, default `False`.
+
+**You do not have to do anything about it.** `runfiles_group_aspect` reads the flag and returns
+before it calls any describe function, so a describe function never sees it and your rules never
+merge `runfiles_groups.RULE_ATTRS`. The only reason that fragment exists is that Starlark has no way
+to read a build setting without an attribute, and the aspect carries the attribute on your behalf.
 
 ### Creating entries
 
@@ -210,26 +285,28 @@ producer that switches form.
 
 ### Propagating entries
 
-**Bottom-up (recommended).** In each `*_library` rule, hand your own entries and your dependencies
-to `runfiles_groups.collect()`. It contributes your entries directly and references your
-dependencies' depsets, so it is O(direct deps) and flattens nothing:
+**Bottom-up (recommended).** In each `*_library` family's describe function, hand your own entries
+and your dependencies to `runfiles_groups.collect()`. It contributes your entries directly and
+references your dependencies' depsets, so it is O(direct deps) and flattens nothing:
 
 ```starlark
-providers.append(RunfilesGroupInfo(entries = runfiles_groups.collect(
+return RunfilesGroupInfo(entries = runfiles_groups.collect(
     ctx,
-    deps = [ctx.attr.deps, ctx.attr.exports],
-    data = [ctx.attr.data],
-    own = [runfiles_groups.entry(name = ctx.label, content = own_files, kind = "first_party")],
-)))
+    deps = [ctx.rule.attr.deps, ctx.rule.attr.exports],
+    data = [ctx.rule.attr.data],
+    own = [runfiles_groups.entry(name = target.label, content = own_files, kind = "first_party")],
+))
 ```
 
-`deps` and `data` are each an **iterable of `ctx.attr` values**, so a rule with several Label-typed
-attributes collects from all of them in one call — and entry depsets from somewhere other than an
-attribute (a toolchain, an aspect's accumulator) go in `transitive = [...]` rather than into a second
-depset wrapped around the result.
+`deps` and `data` are each an **iterable of `ctx.rule.attr` values**, so a rule with several
+Label-typed attributes collects from all of them in one call — and entry depsets from somewhere
+other than an attribute (a toolchain) go in `transitive = [...]` rather than into a second depset
+wrapped around the result.
 
-**Aspect-based.** Apply an aspect to `deps` in the `*_binary` rule and collect entries while
-walking the graph. This leaves `*_library` rules untouched but needs an aspect.
+This works because `runfiles_group_aspect` propagates over every attribute, so by the time a
+dependent is described its dependencies already carry their groups. A `*_binary` that must re-shape
+what it collected — one group per repository rather than one per target, say — may call
+`runfiles_groups.resolve()` once in its own describe function; a `*_library` must never do that.
 
 > **There is no single best grouping.** Prefer many fine-grained groups and let users coarsen them
 > via `aspect_hints`; set `weight` so packagers can merge well. You provide the raw material, users
@@ -369,8 +446,9 @@ default-ordered, so the common path allocates nothing.
 
 ### Testing your implementation
 
-`runfiles_group_analysis_test` analyzes each binary in **two configurations** via a split
-transition, so one target covers:
+`runfiles_group_analysis_test` attaches `runfiles_group_aspect` to `binaries` itself — so it builds
+the groups the same way a packaging rule does — and analyzes each binary in **two configurations**
+via a split transition, so one target covers:
 
 1. **Well-formedness** — every entry carries all seven fields, `content` is one of the two legal
    forms, `kind` is one of `runfiles_groups.KINDS`, and `executable_group` (if set) names a
@@ -383,7 +461,7 @@ transition, so one target covers:
    `overlapping_group_behavior` picks `"warn"` (default), `"error"` or `"ignore"`.
 4. **Ordering and merging** — asserted with `expected_group_names`, `expected_executable_group`,
    `max_groups` and `expected_group_count`.
-5. **The global switch** — with the flag `False`, the binary must provide no `RunfilesGroupInfo`.
+5. **The global switch** — with the flag `False`, the binary must carry no `RunfilesGroupInfo`.
    Both branches are pinned by the transition, so the result doesn't depend on the flag's value on
    the command line.
 
@@ -403,6 +481,10 @@ runfiles_group_analysis_test(
 > time. Keep one test with `check_disabled = True` for the global-switch contract and set it to
 > `False` on the rest. This is a tool for rule authors' own test suites, not for every `*_binary` in
 > a production build.
+
+If your callback targets need an aspect other than the stock one — one built by
+`make_runfiles_group_aspect()` with extra attributes or toolchains — build your own test rule with
+`make_runfiles_group_analysis_test(aspects = [your_aspect])`.
 
 ---
 
@@ -506,15 +588,15 @@ rendered at execution time. Render the group name with `runfiles_groups.name_str
 
 ## Keeping analysis memory flat
 
-Every configured target's providers stay in Bazel's analysis graph for the life of the server, so
-whatever a producer retains per target is multiplied by the size of the build. Five rules keep that
-bounded:
+An aspect's providers stay in Bazel's analysis graph for the life of the server just as a
+configured target's do, so whatever a describe function retains per target is multiplied by the size
+of the build. Five rules keep that bounded:
 
 - **A target's cost must not depend on its closure.** `runfiles_groups.collect()` references its
   dependencies' entry depsets instead of copying their group sets, so a library atop a 2000-deep
   chain retains as much as a leaf. Copying the transitive group set into every level is quadratic —
   and retained.
-- **Never call `.to_list()` in a `*_library` rule** — not on runfiles, not on
+- **Never call `.to_list()` while describing a `*_library`** — not on runfiles, not on
   `RunfilesGroupInfo.entries`. `runfiles_groups.collect()` flattens nothing;
   `runfiles_groups.resolve()` does, and it belongs in the packaging rule (or, at most once per
   target, in a `*_binary` that genuinely must re-shape its dependencies' groups).
@@ -543,10 +625,22 @@ bazel shutdown && ../tools/shallow_bytes.sh //stress:chain500_lib499 > /tmp/s500
 python3 ../tools/heap_budget.py /tmp/s250.txt /tmp/s500.txt --max-growth 1.3
 ```
 
-`bazel dump --memory` needs Bazel 8 or newer. For a whole-build number, compare
-`bazel info used-heap-size-after-gc` after an analysis-only build with the flag off and on, with a
-`bazel shutdown` in between — and exclude `runfiles_group_analysis_test` targets, whose split
-transition analyzes their closures twice.
+`bazel dump --memory` needs Bazel 8 or newer.
+
+> [!IMPORTANT]
+> That measurement covers a **rule's** providers, and the group entries are no longer among them:
+> they live on the aspect's node, and `bazel dump --memory` can only address `package:`,
+> `configured_target:` and `starlark_module:` — there is no way to name an aspect node. So the
+> scripts and the CI guard now assert the narrower property that a *rule's* own providers stay flat
+> in closure size, and nothing automated covers the entry depsets.
+>
+> The rules above are what keeps those flat, and they are the same rules either way, but changing
+> `runfiles_groups.collect()` to copy its dependencies' group sets would no longer be caught. For a
+> whole-build number, compare `bazel info used-heap-size-after-gc` after an analysis-only build with
+> the flag off and on, with a `bazel shutdown` in between — and exclude
+> `runfiles_group_analysis_test` targets, whose split transition analyzes their closures twice. On
+> the `//stress` closures that delta is around a megabyte against a ~26 MB baseline, which is why it
+> is not the CI guard.
 
 ---
 

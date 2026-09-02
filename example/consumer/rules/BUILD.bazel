@@ -5,6 +5,7 @@ bzl_library(
     srcs = ["fake_package.bzl"],
     visibility = ["//visibility:public"],
     deps = [
+        "@rules_runfiles_group//runfiles_group:aspect",
         "@rules_runfiles_group//runfiles_group:lib",
         "@rules_runfiles_group//runfiles_group:providers",
     ],

@@ -15,7 +15,10 @@ Both forms are ordered, folded, merged and looked up the same way. Use
 runfiles_groups.name_str() wherever you need a plain string -- an artifact name,
 an output group key, a manifest line, an error message.
 
-PRODUCER SIDE -- O(1) allocations per target, never flattens anything:
+PRODUCER SIDE -- what a describe function calls. O(1) allocations per target,
+never flattens anything. A *rule* never calls any of these: RunfilesGroupInfo is
+produced only by runfiles_group_aspect, out of the describe function a ruleset
+publishes on its callback targets. See //runfiles_group:callback.bzl.
 
     runfiles_groups.entry(name, content, kind, rank, do_not_merge, weight, merge_affinity)
         One group entry. The only supported entry constructor. `content` is either a
@@ -89,12 +92,13 @@ runfiles_groups.KINDS / runfiles_groups.DEFAULT_METADATA
     sets none of it.
 
 runfiles_groups.RULE_ATTRS / runfiles_groups.is_enabled(ctx)
-    A pair. Rule authors merge runfiles_groups.RULE_ATTRS into their rule's attrs
-    to gain access to the global RunfilesGroupInfo on/off switch
-    (@rules_runfiles_group//runfiles_group:enabled, default False) and gate
-    provider emission on runfiles_groups.is_enabled(ctx). A rule that calls
+    A pair, and an ASPECT author's tool rather than a rule author's.
+    runfiles_group_aspect merges runfiles_groups.RULE_ATTRS into its own attrs and
+    gates on runfiles_groups.is_enabled(ctx) before it calls anything, so a
+    producing ruleset touches neither. Whoever does call
     runfiles_groups.is_enabled MUST have merged runfiles_groups.RULE_ATTRS, or the
-    read fails.
+    read fails. The switch is @rules_runfiles_group//runfiles_group:enabled,
+    default False.
 
 runfiles_groups.RANK_FOUNDATION / runfiles_groups.RANK_SHARED_DEPS /
 runfiles_groups.RANK_EXECUTABLE
@@ -1133,10 +1137,13 @@ def _limit(ctx, resolved, *, max_groups, default_weight = 0, merged_group_name =
 
 # ---------------------------------------------------------------- global flag
 
-# Attribute fragment consumers merge into their rule's attrs to read the global
-# RunfilesGroupInfo on/off switch. Paired with is_enabled(ctx): a rule that
-# calls runfiles_groups.is_enabled(ctx) must have merged
-# runfiles_groups.RULE_ATTRS into its attrs.
+# Attribute fragment an aspect merges into its own attrs to read the global
+# RunfilesGroupInfo on/off switch. Paired with is_enabled(ctx): whoever calls
+# runfiles_groups.is_enabled(ctx) must have merged runfiles_groups.RULE_ATTRS.
+#
+# runfiles_group_aspect does both, which is why a producing ruleset does neither:
+# the only reason the switch needs an attribute is that Starlark has no other way
+# to read a build setting, and the aspect carries it on the ruleset's behalf.
 #
 # Label("//runfiles_group:enabled") is resolved in this module's repo context,
 # so it points at @rules_runfiles_group//runfiles_group:enabled in every
@@ -1146,16 +1153,18 @@ RULE_ATTRS = {
 }
 
 def _is_enabled(ctx):
-    """Returns whether RunfilesGroupInfo emission is globally enabled.
+    """Returns whether RunfilesGroupInfo production is globally enabled.
 
     Reads the @rules_runfiles_group//runfiles_group:enabled build setting.
-    Requires runfiles_groups.RULE_ATTRS to have been merged into the rule's attrs.
+    Requires runfiles_groups.RULE_ATTRS to have been merged into the attrs of
+    whatever holds this ctx -- in practice an aspect's, since
+    runfiles_group_aspect is what calls this.
 
     Args:
-        ctx: The rule context.
+        ctx: The aspect or rule context.
 
     Returns:
-        True if producing rules should emit RunfilesGroupInfo.
+        True if RunfilesGroupInfo should be produced.
     """
     return ctx.attr._runfiles_group_enabled[BuildSettingInfo].value
 

@@ -25,10 +25,14 @@ jobs:
 
   # Guards the asymptote, not an absolute byte count: the retained heap a single
   # library adds on top of its dependencies must not grow when the transitive
-  # closure grows. A design whose per-target cost is independent of the group
-  # count gives a ratio near 1.0; a flat bottom-up copy of all transitive groups
-  # gives ~2.0 when the closure doubles. Shape-based, so it survives the
-  # constants moving between Bazel versions.
+  # closure grows. Shape-based, so it survives the constants moving between Bazel
+  # versions.
+  #
+  # Note what this does NOT cover. RunfilesGroupInfo lives on runfiles_group_aspect's
+  # node, and `bazel dump --memory` can only address package:, configured_target:
+  # and starlark_module: -- there is no way to name an aspect node. So this measures
+  # the library rule's own providers, and a regression in runfiles_groups.collect()
+  # would not be caught here. See "Keeping analysis memory flat" in the README.
   heap:
     runs-on: ubuntu-latest
     env:

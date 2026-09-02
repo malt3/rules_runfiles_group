@@ -1,10 +1,50 @@
 load("@bazel_skylib//:bzl_library.bzl", "bzl_library")
+load(":asset_bundle.bzl", "asset_bundle_runfiles_group_callback")
+load(":shared_bundle.bzl", "shared_bundle_runfiles_group_callback")
+load(":starlark_app.bzl", "starlark_app_runfiles_group_callback")
+load(":starlark_binary.bzl", "starlark_binary_runfiles_group_callback")
+load(":starlark_library.bzl", "starlark_library_runfiles_group_callback")
+
+# The callback targets each rule points at through its well-known
+# `_runfiles_group_callback` attribute. runfiles_group_aspect reads that attribute
+# and asks the target named here how the visited target's runfiles are grouped.
+#
+# One configured target per rule family, not one provider per target: this is the
+# whole per-ruleset cost of speaking the protocol.
+starlark_library_runfiles_group_callback(
+    name = "starlark_library_callback",
+    visibility = ["//visibility:public"],
+)
+
+starlark_app_runfiles_group_callback(
+    name = "starlark_app_callback",
+    visibility = ["//visibility:public"],
+)
+
+starlark_binary_runfiles_group_callback(
+    name = "starlark_binary_callback",
+    visibility = ["//visibility:public"],
+)
+
+# asset_bundle and shared_bundle are separate little "rulesets" that happen to
+# live in the same workspace, so they bring their own callback targets rather than
+# sharing the Starlark ones.
+asset_bundle_runfiles_group_callback(
+    name = "asset_bundle_callback",
+    visibility = ["//visibility:public"],
+)
+
+shared_bundle_runfiles_group_callback(
+    name = "shared_bundle_callback",
+    visibility = ["//visibility:public"],
+)
 
 bzl_library(
     name = "asset_bundle",
     srcs = ["asset_bundle.bzl"],
     visibility = ["//visibility:public"],
     deps = [
+        "@rules_runfiles_group//runfiles_group:callback",
         "@rules_runfiles_group//runfiles_group:lib",
         "@rules_runfiles_group//runfiles_group:providers",
     ],
@@ -15,6 +55,7 @@ bzl_library(
     srcs = ["shared_bundle.bzl"],
     visibility = ["//visibility:public"],
     deps = [
+        "@rules_runfiles_group//runfiles_group:callback",
         "@rules_runfiles_group//runfiles_group:lib",
         "@rules_runfiles_group//runfiles_group:providers",
     ],
@@ -26,6 +67,8 @@ bzl_library(
     visibility = ["//visibility:public"],
     deps = [
         "//producer/providers",
+        "@rules_runfiles_group//runfiles_group:callback",
+        "@rules_runfiles_group//runfiles_group:lib",
         "@rules_runfiles_group//runfiles_group:providers",
     ],
 )
@@ -36,6 +79,8 @@ bzl_library(
     visibility = ["//visibility:public"],
     deps = [
         "//producer/providers",
+        "@rules_runfiles_group//runfiles_group:callback",
+        "@rules_runfiles_group//runfiles_group:lib",
         "@rules_runfiles_group//runfiles_group:providers",
     ],
 )
@@ -47,6 +92,8 @@ bzl_library(
     deps = [
         "//producer/providers",
         "@hermetic_launcher//launcher:lib_bzl",
+        "@rules_runfiles_group//runfiles_group:callback",
+        "@rules_runfiles_group//runfiles_group:lib",
         "@rules_runfiles_group//runfiles_group:providers",
     ],
 )

@@ -11,3 +11,14 @@ bzl_library(
         "@bazel_skylib//rules:common_settings",
     ],
 )
+
+bzl_library(
+    name = "aspect",
+    srcs = ["aspect.bzl"],
+    visibility = ["//:__subpackages__"],
+    deps = [
+        ":lib",
+        "//runfiles_group/private/providers:runfiles_group_callback_info",
+        "//runfiles_group/private/providers:runfiles_group_info",
+    ],
+)

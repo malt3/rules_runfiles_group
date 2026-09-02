@@ -23,6 +23,8 @@ bool_flag(
 
 exports_files(
     srcs = [
+        "aspect.bzl",
+        "callback.bzl",
         "lib.bzl",
         "providers.bzl",
         "runfiles_group_analysis_test.bzl",
@@ -37,6 +39,24 @@ bzl_library(
     deps = [
         "//runfiles_group/private/providers:runfiles_group_info",
         "//runfiles_group/private/providers:runfiles_group_transform_info",
+    ],
+)
+
+bzl_library(
+    name = "callback",
+    srcs = ["callback.bzl"],
+    visibility = ["//visibility:public"],
+    deps = [
+        "//runfiles_group/private/providers:runfiles_group_callback_info",
+    ],
+)
+
+bzl_library(
+    name = "aspect",
+    srcs = ["aspect.bzl"],
+    visibility = ["//visibility:public"],
+    deps = [
+        "//runfiles_group/private:aspect",
     ],
 )
 

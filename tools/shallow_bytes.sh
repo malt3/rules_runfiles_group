@@ -5,6 +5,12 @@
 # enough to "what this target's own providers add" to be the number to watch: it
 # must not grow with the size of the transitive closure.
 #
+# It measures a *rule's* node. RunfilesGroupInfo lives on runfiles_group_aspect's
+# node instead, and `bazel dump --memory` accepts only package:,
+# configured_target: and starlark_module: -- an aspect node cannot be named. So
+# this covers a rule's own providers, not the group entries. See "Keeping analysis
+# memory flat" in the README.
+#
 # Two caveats when reading an absolute figure. Interned values (String, Label) are
 # re-billed to every node that reaches them, so a node's total includes interned
 # values its dependencies own -- which is why a binary that re-derives one entry per

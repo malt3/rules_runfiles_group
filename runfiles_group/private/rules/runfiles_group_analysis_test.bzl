@@ -1,9 +1,9 @@
-"""A test verifying that RunfilesGroupInfo returned by a *_binary target is valid.
+"""A test verifying that the RunfilesGroupInfo built for a *_binary target is valid.
 
 Each binary is analyzed in two configurations via a split transition: one with the
 global switch @rules_runfiles_group//runfiles_group:enabled set to True, where the
 groups are checked for completeness, overlap and ordering, and one with it set to
-False, where the binary must emit no RunfilesGroupInfo at all.
+False, where the binary must carry no RunfilesGroupInfo at all.
 
 Usage:
 
@@ -19,9 +19,21 @@ runfiles_group_analysis_test(
     overlapping_group_behavior = "error",
 )
 ```
+
+The test attaches `runfiles_group_aspect` to `binaries` itself, which is what
+produces the groups in the first place -- so it takes exactly the path a packaging
+rule takes. A ruleset whose callback targets need an aspect of their own builds an
+instance with that aspect instead:
+
+```starlark
+load("@rules_runfiles_group//runfiles_group:runfiles_group_analysis_test.bzl", "make_runfiles_group_analysis_test")
+
+my_analysis_test = make_runfiles_group_analysis_test(aspects = [my_runfiles_group_aspect])
+```
 """
 
 load("@bazel_skylib//lib:sets.bzl", "sets")
+load("//runfiles_group/private:aspect.bzl", "runfiles_group_aspect")
 load("//runfiles_group/private:lib.bzl", "runfiles_groups")
 load("//runfiles_group/private/providers:runfiles_group_info.bzl", "RunfilesGroupInfo")
 
@@ -105,7 +117,10 @@ def _test_one(ctx, binary_attr):
     resolved = runfiles_groups.resolve(ctx, binary_attr, aspect_hints = [])
     if resolved == None:
         return (False, [
-            "doesn't provide RunfilesGroupInfo even though {} is True.".format(_ENABLED_SETTING),
+            ("has no RunfilesGroupInfo even though {} is True.\n" +
+             "Give the rule a '_runfiles_group_callback' attribute pointing at a target " +
+             "that returns RunfilesGroupCallbackInfo, and make sure the aspect that reads " +
+             "it is attached to this test's `binaries` attribute.").format(_ENABLED_SETTING),
         ])
     if default_runfiles == None:
         return (False, ["doesn't have default_runfiles to compare to."])
@@ -234,9 +249,10 @@ def _test_one_disabled(binary_attr):
     if RunfilesGroupInfo not in binary_attr:
         return (True, [])
     return (False, [
-        ("still provides RunfilesGroupInfo even though {} is False.\n" +
-         "Gate emission on runfiles_groups.is_enabled(ctx) (and merge " +
-         "runfiles_groups.RULE_ATTRS into the rule's attrs).").format(_ENABLED_SETTING),
+        ("still has RunfilesGroupInfo even though {} is False.\n" +
+         "runfiles_group_aspect gates on the switch itself, so this means the rule " +
+         "returns the provider directly -- which the protocol does not allow. Move the " +
+         "grouping into a describe function on a callback target.").format(_ENABLED_SETTING),
     ])
 
 def _runfiles_group_analysis_test_impl(ctx):
@@ -277,9 +293,7 @@ def _runfiles_group_analysis_test_impl(ctx):
         message = "\n".join(sections),
     )]
 
-runfiles_group_analysis_test = rule(
-    implementation = _runfiles_group_analysis_test_impl,
-    doc = """\
+_DOC = """\
 Checks that RunfilesGroupInfo is well formed by comparing all runfiles components
 (files, empty_filenames, symlinks, root_symlinks) of DefaultInfo.default_runfiles
 with the union of all runfiles from RunfilesGroupInfo.
@@ -291,27 +305,27 @@ Additionally, it can warn about entries appearing in multiple groups (overlappin
 verify the expected ordered group names, verify which group carries the executable,
 and optionally apply merge-to-limit before ordering.
 
-Every binary is analyzed in two configurations via a split transition, so one test
-target also verifies that the rule honors the global on/off switch
-(@rules_runfiles_group//runfiles_group:enabled):
+The groups come from the aspect this rule attaches to `binaries`
+(runfiles_group_aspect by default), which is how a packaging rule gets them too.
 
-  * enabled: all of the checks above run against the emitted providers.
-  * disabled: the binary must provide no RunfilesGroupInfo at all. Set
+Every binary is analyzed in two configurations via a split transition, so one test
+target also verifies that the global on/off switch
+(@rules_runfiles_group//runfiles_group:enabled) is honored:
+
+  * enabled: all of the checks above run against the resulting providers.
+  * disabled: the binary must carry no RunfilesGroupInfo at all. Set
     check_disabled = False to skip this branch, which avoids analyzing the
     binary's whole closure a second time.
 
 Because both branches are pinned by the transition, the test is independent of the
 value the flag has on the command line.
-""",
-    attrs = {
-        "binaries": attr.label_list(
-            cfg = _rgi_split_transition,
-            mandatory = True,
-            doc = "List of *_binary targets to test.",
-        ),
-        "check_disabled": attr.bool(
-            default = True,
-            doc = """\
+"""
+
+# Everything but `binaries`, whose `aspects` vary per instantiation.
+_COMMON_ATTRS = {
+    "check_disabled": attr.bool(
+        default = True,
+        doc = """\
 Also analyze every binary with @rules_runfiles_group//runfiles_group:enabled set
 to False and verify it emits no RunfilesGroupInfo.
 
@@ -320,49 +334,80 @@ by default. It does cost a second configuration for the binary and its entire
 transitive closure, so set it to False on tests over large binaries and keep one
 small target that checks it. Must not be a select().
 """,
-        ),
-        "expected_group_names": attr.string_list(
-            doc = """\
+    ),
+    "expected_group_names": attr.string_list(
+        doc = """\
 If set, the test verifies that the ordered group names (after optional merging and rank-based ordering)
 match this list exactly. Applies to all binaries in the test.
 
 Names are compared in canonical string form (runfiles_groups.name_str), so a group
 named by a Label is written as its canonical label string, e.g. "@@//src:lib_a".
 """,
-        ),
-        "expected_executable_group": attr.string(
-            doc = """\
+    ),
+    "expected_executable_group": attr.string(
+        doc = """\
 If set, the test verifies that RunfilesGroupInfo.executable_group (after optional
 merging) is exactly this group name, in canonical string form
 (runfiles_groups.name_str) -- so a group named by a Label is written as its
 canonical label string. Applies to all binaries in the test.
 """,
-        ),
-        "max_groups": attr.int(
-            doc = "If >= 0, apply runfiles_groups.limit with this limit before ordering. -1 means no limit.",
-            default = -1,
-        ),
-        "expected_group_count": attr.int(
-            doc = """\
+    ),
+    "max_groups": attr.int(
+        doc = "If >= 0, apply runfiles_groups.limit with this limit before ordering. -1 means no limit.",
+        default = -1,
+    ),
+    "expected_group_count": attr.int(
+        doc = """\
 If >= 0, verify the exact number of groups after merging (requires max_groups >= 0).
 Use this when merging cannot reach max_groups (e.g., due to do_not_merge or rank constraints)
 to assert the actual reachable count. -1 means no check (the test fails if group_count > max_groups instead).
 """,
-            default = -1,
-        ),
-        "group_name_prefix": attr.string(
-            doc = """\
+        default = -1,
+    ),
+    "group_name_prefix": attr.string(
+        doc = """\
 If set, merged group names will strip this prefix from the second (heavier) group name
 before joining with '+'. This avoids repeating a common prefix in merged names.
 For example, with prefix "p#", merging "p#foo" and "p#bar" produces "p#foo+bar" instead of "p#foo+p#bar".
 Names are canonicalized first, so this also applies to groups named by a Label.
 """,
+    ),
+    "overlapping_group_behavior": attr.string(
+        doc = "How to handle overlapping groups (the same entry being present in more than one group).",
+        default = "warn",
+        values = ["warn", "ignore", "error"],
+    ),
+}
+
+def make_runfiles_group_analysis_test(*, aspects = [runfiles_group_aspect]):
+    """Builds a runfiles_group_analysis_test rule with the given aspects on `binaries`.
+
+    Use this when your callback targets need an aspect other than the stock one --
+    one built by `make_runfiles_group_aspect()` with extra attributes or
+    toolchains. The default is the stock aspect, which is what
+    `runfiles_group_analysis_test` uses.
+
+    Args:
+        aspects: Aspects to apply to the `binaries` attribute. Whatever produces
+            RunfilesGroupInfo for the targets under test belongs here; the default
+            is `runfiles_group_aspect`.
+
+    Returns:
+        An analysis test rule.
+    """
+    return rule(
+        implementation = _runfiles_group_analysis_test_impl,
+        doc = _DOC,
+        attrs = dict(
+            _COMMON_ATTRS,
+            binaries = attr.label_list(
+                cfg = _rgi_split_transition,
+                mandatory = True,
+                aspects = aspects,
+                doc = "List of *_binary targets to test.",
+            ),
         ),
-        "overlapping_group_behavior": attr.string(
-            doc = "How to handle overlapping groups (the same entry being present in more than one group).",
-            default = "warn",
-            values = ["warn", "ignore", "error"],
-        ),
-    },
-    analysis_test = True,
-)
+        analysis_test = True,
+    )
+
+runfiles_group_analysis_test = make_runfiles_group_analysis_test()

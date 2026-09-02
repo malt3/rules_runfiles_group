@@ -26,6 +26,7 @@ attr.label_list_dict is Bazel 9 and newer. On older versions the rule drops
 demonstration.
 """
 
+load("@rules_runfiles_group//runfiles_group:callback.bzl", "RunfilesGroupCallbackInfo")
 load("@rules_runfiles_group//runfiles_group:lib.bzl", "runfiles_groups")
 load("@rules_runfiles_group//runfiles_group:providers.bzl", "RunfilesGroupInfo")
 load("//producer/providers:providers.bzl", "StarlarkInfo")
@@ -50,27 +51,31 @@ _EXTRA_ATTRS = {
 def _loadpath(target):
     return target[StarlarkInfo].loadpath
 
+def _dep_attrs(attrs):
+    """Every dependency attribute, in the shape ctx.attr hands it over.
+
+    This is the list runfiles_groups.collect() walks: one element per attribute,
+    and it finds the Targets inside each -- the Target itself, a list of them, or
+    whichever side of a dict carries them.
+    """
+    return [
+        attrs.main,
+        attrs.deps,
+        attrs.plugins,
+        attrs.pinned_versions,
+        getattr(attrs, "optional_features", {}),
+    ]
+
 def _starlark_app_impl(ctx):
     optional_features = getattr(ctx.attr, "optional_features", {})
 
-    # Every dependency attribute, in the shape ctx.attr hands it over. This is the
-    # list runfiles_groups.collect() walks: one element per attribute, and it finds
-    # the Targets inside each -- the Target itself, a list of them, or whichever side
-    # of a dict carries them.
-    dep_attrs = [
-        ctx.attr.main,
-        ctx.attr.deps,
-        ctx.attr.plugins,
-        ctx.attr.pinned_versions,
-        optional_features,
-    ]
-
-    # The same dependencies, flattened by hand rather than by asking lib for them.
-    # Spelling it out is the point: DefaultInfo below is built from *this* list and
-    # RunfilesGroupInfo from `dep_attrs`, so a bug in lib's attribute walking shows
-    # up as files that are in default_runfiles and in no group -- which is exactly
-    # what runfiles_group_analysis_test checks. Sharing one flattening between the
-    # two would make that check agree with itself and prove nothing.
+    # The same dependencies as _dep_attrs, flattened by hand rather than by asking
+    # the protocol for them. Spelling it out is the point: DefaultInfo below is
+    # built from *this* list and the groups from _dep_attrs, so a bug in the
+    # attribute walking shows up as files that are in default_runfiles and in no
+    # group -- which is exactly what runfiles_group_analysis_test checks. Sharing
+    # one flattening between the two would make that check agree with itself and
+    # prove nothing.
     dep_targets = [ctx.attr.main] + ctx.attr.deps + ctx.attr.plugins.values() + ctx.attr.pinned_versions.keys()
     for targets in optional_features.values():
         dep_targets += targets
@@ -91,7 +96,8 @@ def _starlark_app_impl(ctx):
     )))
 
     # One depset for the two things that need the app's own files, exactly as
-    # starlark_library does it: DefaultInfo and the group entry below.
+    # starlark_library does it: DefaultInfo, and the group the describe function
+    # reads back off it.
     own_files = depset([registry])
 
     # One merge_all rather than a per-dep fold. See starlark_library.bzl.
@@ -101,7 +107,7 @@ def _starlark_app_impl(ctx):
         to_merge.append(ctx.runfiles(files = ctx.files.data))
     own_runfiles = ctx.runfiles(transitive_files = own_files)
 
-    providers = [
+    return [
         DefaultInfo(
             files = own_files,
             runfiles = own_runfiles.merge_all(to_merge),
@@ -113,25 +119,42 @@ def _starlark_app_impl(ctx):
         ),
     ]
 
-    # Honor the global on/off switch: emit no RunfilesGroupInfo when disabled.
-    if not runfiles_groups.is_enabled(ctx):
-        return providers
+def _starlark_app_groups(target, ctx, _payload):
+    """Describes a starlark_app's runfiles as groups.
+
+    Args:
+        target: The starlark_app being described.
+        ctx: The aspect context.
+        _payload: Unused; this callback carries none.
+
+    Returns:
+        RunfilesGroupInfo.
+    """
 
     # One call for all five dependency attributes plus data. A library reached
     # through two of them -- a plugin that is also a plain dep, say -- propagates
-    # the same entry depset twice, and lib folds the duplicate group back into one.
-    providers.append(RunfilesGroupInfo(entries = runfiles_groups.collect(
+    # the same entry depset twice, and the fold collapses the duplicate group back
+    # into one.
+    return RunfilesGroupInfo(entries = runfiles_groups.collect(
         ctx,
-        deps = dep_attrs,
-        data = [ctx.attr.data],
+        deps = _dep_attrs(ctx.rule.attr),
+        data = [ctx.rule.attr.data],
         own = [runfiles_groups.entry(
-            name = ctx.label,
-            content = own_files,
+            name = target.label,
+            content = target[DefaultInfo].files,
             kind = "first_party",
             merge_affinity = _AFFINITY,
         )],
-    )))
-    return providers
+    ))
+
+def _starlark_app_callback_impl(_ctx):
+    return [RunfilesGroupCallbackInfo(describe = _starlark_app_groups)]
+
+starlark_app_runfiles_group_callback = rule(
+    implementation = _starlark_app_callback_impl,
+    doc = "Publishes how a starlark_app's runfiles are grouped.",
+    provides = [RunfilesGroupCallbackInfo],
+)
 
 _starlark_app = rule(
     implementation = _starlark_app_impl,
@@ -157,7 +180,10 @@ _starlark_app = rule(
             allow_files = True,
             doc = "Data files available at runtime.",
         ),
-    }, **dict(_EXTRA_ATTRS, **runfiles_groups.RULE_ATTRS)),
+        "_runfiles_group_callback": attr.label(
+            default = Label("//producer/rules:starlark_app_callback"),
+        ),
+    }, **_EXTRA_ATTRS),
 )
 
 def starlark_app(name, optional_features = None, **kwargs):
